@@ -1,0 +1,19 @@
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Python
+__pycache__/
+.pytest_cache/
+*.py[cod]
+backend/.venv/
+
+# Local environment files and server-side API keys
+.env
+.env.*
+!.env.example
+
+# Editor and operating system files
+.DS_Store
+Thumbs.db
+.vscode/
