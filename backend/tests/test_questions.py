@@ -1,6 +1,7 @@
 """API tests for grounded document questions and source handling."""
 
 import asyncio
+import unicodedata
 from pathlib import Path
 
 import httpx
@@ -26,8 +27,13 @@ def api_request(method: str, path: str, **kwargs: object) -> httpx.Response:
 
 
 @pytest.fixture(autouse=True)
-def leave_evon_unconfigured(monkeypatch: pytest.MonkeyPatch) -> None:
+def keep_evon_mocked(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("SAAR_EVON_BASE_URL", raising=False)
+
+    async def evon_is_not_configured(*args: object, **kwargs: object) -> str:
+        raise qa.EvonNotConfigured
+
+    monkeypatch.setattr(qa, "generate_with_evon", evon_is_not_configured)
 
 
 def ask(
@@ -223,6 +229,63 @@ def test_project_sample_pdf_extracts_and_answers_its_numbered_document_section()
     }]
 
 
+def test_last_date_to_apply_uses_deadline_from_actual_project_pdf() -> None:
+    extracted_pages = sample_notice_pages()
+    question = "What is the last date to apply?"
+
+    assert any(
+        "Application Deadline: 30 November 2026" in page["text"]
+        for page in extracted_pages
+    )
+    assert qa.map_question_for_retrieval(question) == (
+        qa.CANONICAL_QUESTIONS_BY_INTENT["deadline"],
+        "deadline",
+    )
+
+    response = ask(question, extracted_pages)
+    result = response.json()
+
+    assert response.status_code == 200
+    assert result["status"] == "answered"
+    assert "30 November 2026" in result["answer"]
+    assert result["sources"] == [{
+        "page_number": 1,
+        "text": "Application Deadline\n30 November 2026 (fictional date)",
+    }]
+
+
+def test_last_date_to_apply_abstains_when_only_notice_date_is_present() -> None:
+    response = ask(
+        "What is the last date to apply?",
+        [{
+            "page_number": 2,
+            "text": "Notice Date: 2 November 2026\n"
+            "How to Apply\nSubmit the application through the student support office.",
+        }],
+    )
+    result = response.json()
+
+    assert response.status_code == 200
+    assert result["status"] == "not_found"
+    assert result["answer"] == qa.NOT_ENOUGH_INFORMATION["en"]
+    assert result["sources"] == []
+
+
+def test_last_date_to_apply_accepts_a_named_deadline_without_a_year() -> None:
+    response = ask(
+        "What is the last date to apply?",
+        [{"page_number": 3, "text": "Application Deadline\n30 November"}],
+    )
+    result = response.json()
+
+    assert response.status_code == 200
+    assert result["status"] == "answered"
+    assert "30 November" in result["answer"]
+    assert result["sources"] == [
+        {"page_number": 3, "text": "Application Deadline\n30 November"}
+    ]
+
+
 @pytest.mark.parametrize(
     ("question", "expected_intent"),
     [
@@ -241,6 +304,78 @@ def test_gujarati_question_mapping_covers_common_scholarship_intents(
 
     assert intent == expected_intent
     assert all(ord(character) < 128 for character in normalized)
+
+
+@pytest.mark.parametrize(
+    ("question", "expected_intent"),
+    [
+        ("छात्रवृत्ति के आवेदन में कौन से कागज़ात जमा करने होंगे?", "documents"),
+        ("आवेदन कब तक कर सकते हैं?", "deadline"),
+        ("छात्रवृत्ति कितनी मिलेगी?", "amount"),
+        ("कौन-कौन छात्र इस छात्रवृत्ति के लिए योग्य हैं?", "eligibility"),
+        ("आवेदन कहाँ जमा करना है?", "how_to_apply"),
+        ("શિષ્યવૃત્તિ માટે કયા કાગળો જરૂરી છે?", "documents"),
+        ("અરજી ક્યારે બંધ થાય છે?", "deadline"),
+        ("શિષ્યવૃત્તિની રકમ કેટલી છે?", "amount"),
+        ("કયા વિદ્યાર્થીઓ શિષ્યવૃત્તિ માટે લાયક છે?", "eligibility"),
+        ("અરજી ક્યાં જમા કરાવવી?", "how_to_apply"),
+    ],
+)
+def test_hindi_and_gujarati_paraphrases_map_to_common_intents(
+    question: str,
+    expected_intent: str,
+) -> None:
+    normalized, intent = qa.map_question_for_retrieval(question)
+
+    assert normalized == qa.CANONICAL_QUESTIONS_BY_INTENT[expected_intent]
+    assert intent == expected_intent
+
+
+@pytest.mark.parametrize(
+    ("question", "expected_intent"),
+    [
+        ("छात्रवृत्ति की आखिरी तारीख क्या है?", "deadline"),
+        ("आवेदन की अंतिम तिथि कब है?", "deadline"),
+        ("कितनी छात्रवृत्ति मिलेगी?", "amount"),
+        ("राशि छात्रवृत्ति की कितनी है?", "amount"),
+        ("शिष्यवृत्ती માટે અરજી કરવાની છેલ્લી તારીખ શું છે?", "deadline"),
+        ("શિષ્યવૃત્તિ માટે ક્યારે સુધી અરજી કરી શકું?", "deadline"),
+        ("કેટલી સહાય મળશે?", "amount"),
+        ("શિષ્યવૃત્તિની અરજી કરવાની રીત શું છે?", "how_to_apply"),
+    ],
+)
+def test_intent_matching_handles_word_order_variants(
+    question: str,
+    expected_intent: str,
+) -> None:
+    normalized, intent = qa.map_question_for_retrieval(question)
+
+    assert normalized == qa.CANONICAL_QUESTIONS_BY_INTENT[expected_intent]
+    assert intent == expected_intent
+
+
+@pytest.mark.parametrize(
+    ("question", "expected_intent"),
+    [
+        ("छात्रवृत्ति के लिए कौन-कौन से दस्तावेज़ आवश्यक हैं?", "documents"),
+        ("શિષ્યવૃત્તિ માટે કયા દસ્તાવેજો જરૂરી છે?", "documents"),
+    ],
+)
+def test_intent_matching_normalizes_unicode_composition(
+    question: str,
+    expected_intent: str,
+) -> None:
+    decomposed_question = unicodedata.normalize("NFD", question)
+    normalized, intent = qa.map_question_for_retrieval(decomposed_question)
+
+    assert normalized == qa.CANONICAL_QUESTIONS_BY_INTENT[expected_intent]
+    assert intent == expected_intent
+
+
+def test_english_question_is_not_rewritten_by_localized_mapping() -> None:
+    question = "What documents are required for the scholarship?"
+
+    assert qa.map_question_for_retrieval(question) == (question, None)
 
 
 @pytest.mark.parametrize(
@@ -357,6 +492,244 @@ def test_exact_hindi_document_question_answers_from_project_pdf_api() -> None:
         "• Bank account details or passbook copy\n"
         "• A recent passport-size photograph",
     }]
+
+
+@pytest.mark.parametrize(
+    ("question", "response_language", "intent", "answer_phrase"),
+    [
+        (
+            "छात्रवृत्ति के आवेदन में कौन से कागज़ात जमा करने होंगे?",
+            "hi", "documents", "छात्र पहचान पत्र",
+        ),
+        (
+            "શિષ્યવૃત્તિ માટે કયા કાગળો જરૂરી છે?",
+            "gu", "documents", "વિદ્યાર્થી ઓળખપત્ર",
+        ),
+        ("आवेदन की अंतिम तिथि कब है?", "hi", "deadline", "30 November 2026"),
+        ("અરજી ક્યારે બંધ થાય છે?", "gu", "deadline", "30 November 2026"),
+        (
+            "कौन-कौन छात्र इस छात्रवृत्ति के लिए योग्य हैं?",
+            "hi", "eligibility", "currently enrolled in an undergraduate program",
+        ),
+        (
+            "કયા વિદ્યાર્થીઓ શિષ્યવૃત્તિ માટે લાયક છે?",
+            "gu", "eligibility", "currently enrolled in an undergraduate program",
+        ),
+        (
+            "आवेदन कहाँ जमा करना है?",
+            "hi", "how_to_apply", "support office",
+        ),
+        (
+            "અરજી ક્યાં જમા કરાવવી?",
+            "gu", "how_to_apply", "support office",
+        ),
+    ],
+)
+def test_localized_paraphrases_return_matching_cited_project_pdf_section(
+    question: str,
+    response_language: str,
+    intent: str,
+    answer_phrase: str,
+) -> None:
+    response = ask(question, sample_notice_pages(), response_language=response_language)
+
+    result = response.json()
+    assert response.status_code == 200
+    assert result["status"] == "answered"
+    assert answer_phrase in result["answer"]
+    assert result["sources"]
+    assert result["sources"][0]["page_number"] == 1
+    assert result["sources"][0]["text"].startswith(
+        {
+            "documents": "Documents Required\n",
+            "deadline": "Application Deadline\n",
+            "eligibility": "Eligibility Criteria\n",
+            "how_to_apply": "How to Apply\n",
+        }[intent]
+    )
+
+
+def test_hindi_original_question_and_response_language_reach_evon(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    received: list[tuple[str, str]] = []
+
+    async def return_abstention_token(
+        question: str,
+        passages: list[qa.SourcePassage],
+        response_language: str,
+    ) -> str:
+        received.append((question, response_language))
+        return qa.INSUFFICIENT_INFORMATION_TOKEN
+
+    monkeypatch.setattr(qa, "generate_with_evon", return_abstention_token)
+    original_question = "कौन-कौन छात्र इस छात्रवृत्ति के लिए योग्य हैं?"
+    response = ask(original_question, sample_notice_pages(), response_language="hi")
+
+    result = response.json()
+    assert response.status_code == 200
+    assert result["status"] == "answered"
+    assert result["sources"][0]["page_number"] == 1
+    assert received == [(original_question, "hi")]
+
+
+@pytest.mark.parametrize(
+    ("question", "response_language"),
+    [
+        ("कितनी छात्रवृत्ति मिलेगी?", "hi"),
+        ("કેટલી સહાય મળશે?", "gu"),
+    ],
+)
+def test_localized_missing_amount_question_abstains_via_api(
+    question: str,
+    response_language: str,
+) -> None:
+    response = ask(question, sample_notice_pages(), response_language=response_language)
+
+    result = response.json()
+    assert response.status_code == 200
+    assert result["status"] == "not_found"
+    assert result["answer"] == qa.NOT_ENOUGH_INFORMATION[response_language]
+    assert result["sources"] == []
+
+
+@pytest.mark.parametrize(
+    ("question", "response_language"),
+    [
+        ("छात्रवृत्ति की रकम कितनी है?", "hi"),
+        ("કેટલી સહાય મળશે?", "gu"),
+    ],
+)
+def test_localized_amount_question_returns_only_the_supported_section(
+    question: str,
+    response_language: str,
+) -> None:
+    response = ask(
+        question,
+        [{
+            "page_number": 4,
+            "text": "Scholarship Amount\nThe award amount is Rs. 25,000 per year.\n"
+            "Eligibility Criteria\nApplicants must be enrolled at a recognized institution.",
+        }],
+        response_language=response_language,
+    )
+
+    result = response.json()
+    assert response.status_code == 200
+    assert result["status"] == "answered"
+    assert "Rs. 25,000 per year" in result["answer"]
+    assert result["sources"] == [
+        {
+            "page_number": 4,
+            "text": "Scholarship Amount\nThe award amount is Rs. 25,000 per year.",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("question", "response_language"),
+    [
+        ("वजीफा कब मिलेगा?", "hi"),
+        ("વજીફો ક્યારે મળશે?", "gu"),
+        ("શિષ્યવૃત્તિ ક્યારે સુધી મળશે?", "gu"),
+    ],
+)
+def test_stipend_disbursement_timing_question_abstains_without_timing(
+    question: str,
+    response_language: str,
+) -> None:
+    notice = [{
+        "page_number": 2,
+        "text": "Application Deadline\nApplications close on 30 November 2026.\n"
+        "Scholarship Amount\nThe award amount is Rs. 25,000 per year.",
+    }]
+
+    assert qa.map_question_for_retrieval(question) == (question, None)
+    response = ask(question, notice, response_language=response_language)
+
+    result = response.json()
+    assert response.status_code == 200
+    assert result["status"] == "not_found"
+    assert result["answer"] == qa.NOT_ENOUGH_INFORMATION[response_language]
+    assert result["sources"] == []
+
+
+@pytest.mark.parametrize(
+    ("question", "response_language"),
+    [
+        ("When is the application deadline, and who is eligible?", "en"),
+        ("आवेदन की आखिरी तारीख क्या है और कौन पात्र है?", "hi"),
+        ("અરજીની છેલ્લી તારીખ શું છે અને કોણ પાત્ર છે?", "gu"),
+    ],
+)
+def test_compound_deadline_and_eligibility_question_gets_clarification(
+    question: str,
+    response_language: str,
+) -> None:
+    notice = [{
+        "page_number": 1,
+        "text": "Application Deadline\nApplications close on 30 November 2026.\n"
+        "Eligibility Criteria\nApplicants must be enrolled at a recognized institution.",
+    }]
+    response = ask(question, notice, response_language=response_language)
+
+    result = response.json()
+    assert response.status_code == 200
+    assert result["status"] == "not_found"
+    assert result["answer"] == qa.MULTIPLE_INTENTS_CLARIFICATION[response_language]
+    assert result["sources"] == []
+
+
+@pytest.mark.parametrize(
+    ("question", "response_language"),
+    [
+        ("छात्रवृत्ति के बारे में बताइए।", "hi"),
+        ("શિષ્યવૃત્તિ વિશે જણાવો.", "gu"),
+        ("छात्रवृत्ति कब मिलेगी?", "hi"),
+        ("શિષ્યવૃત્તિ ક્યારે મળશે?", "gu"),
+        ("Tell me more.", "en"),
+    ],
+)
+def test_ambiguous_question_does_not_force_an_intent_or_answer(
+    question: str,
+    response_language: str,
+) -> None:
+    notice = [{"page_number": 1, "text": "General notice information."}]
+
+    assert qa.map_question_for_retrieval(question) == (question, None)
+    response = ask(question, notice, response_language=response_language)
+
+    result = response.json()
+    assert response.status_code == 200
+    assert result["status"] == "not_found"
+    assert result["answer"] == qa.NOT_ENOUGH_INFORMATION[response_language]
+    assert result["sources"] == []
+
+
+@pytest.mark.parametrize(
+    ("question", "response_language"),
+    [
+        ("आवश्यक दस्तावेज़ कौन से हैं?", "hi"),
+        ("શિષ્યવૃત્તિ માટે કયા દસ્તાવેજો જરૂરી છે?", "gu"),
+    ],
+)
+def test_localized_document_question_abstains_when_list_is_absent(
+    question: str,
+    response_language: str,
+) -> None:
+    notice = [{
+        "page_number": 3,
+        "text": "Documents Required\n"
+        "How to Apply\n"
+        "Prepare the listed documents and submit the application through the student support office.",
+    }]
+    response = ask(question, notice, response_language=response_language)
+
+    result = response.json()
+    assert response.status_code == 200
+    assert result["status"] == "not_found"
+    assert result["answer"] == qa.NOT_ENOUGH_INFORMATION[response_language]
+    assert result["sources"] == []
 
 
 def test_hindi_missing_scholarship_amount_abstains_via_api(

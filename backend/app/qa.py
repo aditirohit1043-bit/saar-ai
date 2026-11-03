@@ -3,6 +3,7 @@
 import math
 import re
 import textwrap
+import unicodedata
 from dataclasses import dataclass
 from typing import Literal
 
@@ -44,6 +45,11 @@ REQUIRED_DOCUMENT_INTRODUCTIONS = {
     "en": "The required documents are:",
     "hi": "आवश्यक दस्तावेज़ हैं:",
     "gu": "જરૂરી દસ્તાવેજો છે:",
+}
+MULTIPLE_INTENTS_CLARIFICATION = {
+    "en": "Please ask about the application deadline and eligibility separately so I can point to the right parts of the notice.",
+    "hi": "कृपया आवेदन की अंतिम तिथि और पात्रता के बारे में अलग-अलग पूछें, ताकि मैं नोटिस के सही हिस्से दिखा सकूँ।",
+    "gu": "કૃપા કરીને અરજીની અંતિમ તારીખ અને પાત્રતા વિશે અલગ અલગ પૂછો, જેથી હું નોટિસના યોગ્ય વિભાગો બતાવી શકું.",
 }
 
 TOKEN_PATTERN = re.compile(r"[^\W_]+", re.UNICODE)
@@ -100,24 +106,97 @@ SECTION_HEADING_NAMES = {
 LIST_MARKER_PATTERN = re.compile(r"^\s*(?:(?:[-*•▪◦])\s*|\d+\s*[.)]\s*)")
 GUJARATI_SCRIPT_PATTERN = re.compile(r"[\u0a80-\u0aff]")
 HINDI_SCRIPT_PATTERN = re.compile(r"[\u0900-\u097f]")
-GUJARATI_SCHOLARSHIP_TERMS = ("શિષ્યવૃત્તિ", "સ્કોલરશિપ", "સ્કોલરશીપ")
-GUJARATI_DOCUMENT_TERMS = ("દસ્તાવેજ", "કાગળ")
-GUJARATI_REQUIRED_TERMS = (
-    "જરૂરી", "આવશ્યક", "જોઈએ", "જોઇએ", "પડશે", "આપવા", "જમા", "સબમિટ", "કયા",
-)
-GUJARATI_DEADLINE_TERMS = ("છેલ્લી તારીખ", "અંતિમ તારીખ", "સમયમર્યાદા", "ક્યારે અરજી")
-GUJARATI_AMOUNT_TERMS = ("રકમ", "કેટલી", "કેટલા", "કેટલું", "સહાય", "સ્ટાઇપેન્ડ")
-GUJARATI_ELIGIBILITY_TERMS = ("પાત્રતા", "લાયકાત", "પાત્ર", "લાયક")
-GUJARATI_APPLICATION_TERMS = ("અરજી",)
-GUJARATI_HOW_TO_APPLY_TERMS = ("કેવી રીતે", "કઈ રીતે", "ક્યાં", "પ્રક્રિયા")
-HINDI_DOCUMENT_TERMS = ("दस्तावेज़", "दस्तावेज", "कागजात", "कागज़ात", "कागज", "कागज़")
-HINDI_REQUIRED_DOCUMENT_TERMS = (
-    "आवश्यक", "जरूरी", "ज़रूरी", "अनिवार्य", "चाहिए", "कौन-कौन से",
-    "कौन कौन से", "कौन-कौन-से", "कौन से", "कौनसे",
+GUJARATI_INTENT_TERMS = {
+    "scholarship": ("શિષ્યવૃત્તિ", "વિદ્યાવૃત્તિ", "સ્કોલરશિપ", "સ્કોલરશીપ"),
+    "application": ("અરજી", "અરજી ફોર્મ", "ફોર્મ"),
+    "documents": ("દસ્તાવેજ", "કાગળ", "પ્રમાણપત્ર", "સર્ટિફિકેટ"),
+    "required_documents": (
+        "જરૂરી", "આવશ્યક", "જોઈએ", "જોઇએ", "પડશે", "આપવા", "જમા કરાવવા",
+        "સબમિટ", "કયા", "કઈ", "કયો", "કયા કયા", "કેટલા", "કેટલી", "શું જોઈએ",
+    ),
+    "deadline": (
+        "છેલ્લી તારીખ", "અંતિમ તારીખ", "સમયમર્યાદા", "છેલ્લી મુદત", "અંતિમ મુદત",
+        "અરજી ક્યારે બંધ", "અરજી કરવાની છેલ્લી તારીખ", "અરજીની અંતિમ તારીખ",
+    ),
+    "when": ("ક્યારે", "કયા દિવસે", "કઈ તારીખે", "ક્યારે સુધી"),
+    "amount": ("રકમ", "રાશિ", "ધનરાશિ", "પૈસા", "રૂપિયા", "રૂપિયો", "amount"),
+    "amount_topic": ("સહાય", "આર્થિક સહાય", "સ્ટાઇપેન્ડ", "વજીફો", "પુરસ્કાર"),
+    "quantity": ("કેટલી", "કેટલું", "કેટલા", "કેટલો"),
+    "eligibility": (
+        "પાત્રતા", "લાયકાત", "પાત્ર", "લાયક", "યોગ્યતા", "કોણ અરજી કરી શકે",
+        "કોણ મેળવી શકે", "કયા વિદ્યાર્થીઓ", "કોને મળે",
+    ),
+    "apply_procedure": (
+        "કેવી રીતે", "કઈ રીતે", "પ્રક્રિયા", "અરજી કરવાની રીત", "ક્યાં", "કયા કાર્યાલય",
+        "કયા વિભાગ", "જમા કરાવવી", "જમા કરવું", "સબમિટ", "મોકલવી",
+    ),
+}
+HINDI_INTENT_TERMS = {
+    "scholarship": ("छात्रवृत्ति", "छात्रवृति", "स्कॉलरशिप", "स्कालरशिप", "वजीफा"),
+    "application": ("आवेदन", "अप्लाई", "आवेदन पत्र", "फॉर्म"),
+    "documents": (
+        "दस्तावेज़", "दस्तावेज", "कागजात", "कागज़ात", "काग़ज़ात", "कागज", "काग़ज़",
+        "प्रमाणपत्र",
+    ),
+    "required_documents": (
+        "आवश्यक", "जरूरी", "ज़रूरी", "अनिवार्य", "चाहिए", "कौन कौन से", "कौन से",
+        "कौनसे", "कौन सा", "कौनसा", "किस किस", "कौन कौन से जमा", "मांगे गए",
+        "जमा करने होंगे", "जमा करना होगा",
+    ),
+    "deadline": (
+        "अंतिम तिथि", "आखिरी तिथि", "अंतिम तारीख", "आखिरी तारीख", "समय सीमा",
+        "समयसीमा", "आवेदन की आखिरी तारीख", "आवेदन की अंतिम तिथि", "कब तक आवेदन",
+        "आवेदन कब बंद", "अंतिम दिन",
+    ),
+    "when": ("कब", "कब तक", "किस तारीख", "किस दिन"),
+    "amount": ("राशि", "रकम", "धनराशि", "कितने पैसे", "रुपये", "रुपए", "रुपया", "amount"),
+    "amount_topic": (
+        "सहायता", "आर्थिक सहायता", "स्टाइपेंड", "वजीफा", "छात्रवृत्ति", "स्कॉलरशिप",
+        "stipend", "scholarship", "assistance",
+    ),
+    "quantity": ("कितना", "कितनी", "कितने"),
+    "eligibility": (
+        "पात्रता", "योग्यता", "पात्र", "योग्य", "कौन पात्र", "कौन योग्य",
+        "कौन आवेदन कर सकता", "किन छात्रों", "किसे मिल सकती", "किसके लिए पात्र",
+    ),
+    "apply_procedure": (
+        "कैसे", "किस तरह", "प्रक्रिया", "आवेदन करने की विधि", "कहाँ", "कहां",
+        "किस कार्यालय", "जमा करना", "जमा करें", "भेजें", "आवेदन कहाँ", "आवेदन कहां",
+    ),
+}
+CANONICAL_QUESTIONS_BY_INTENT = {
+    "documents": "What documents are required for the scholarship?",
+    "deadline": "What is the application deadline?",
+    "amount": "What is the scholarship amount?",
+    "eligibility": "What are the eligibility criteria?",
+    "how_to_apply": "How do I apply for the scholarship?",
+}
+ENGLISH_LAST_DATE_TERMS = ("last date", "last day", "final date", "final day", "closing date")
+ENGLISH_APPLICATION_TERMS = ("apply", "application", "applications", "submit", "submission")
+LOCALIZED_WORD_SUFFIXES = (
+    "ઓના", "ઓમાં", "ઓથી", "ો", "ી", "ા", "ુ", "ે", "ૈ", "ૌ", "ઓ", "ની", "નો",
+    "નું", "ના", "ને", "માં", "થી",
+    "ों", "ें", "े", "ो", "ी", "ि", "ा", "याँ", "यां",
 )
 AMOUNT_VALUE_PATTERN = re.compile(
     r"(?:₹\s*\d[\d,]*|\b(?:INR|Rs\.?|rupees?)\s*\d[\d,]*|"
     r"\b(?:amount|stipend|award|grant|worth)\b[^.\n]{0,60}\b\d[\d,]*)",
+    re.IGNORECASE,
+)
+DEADLINE_MONTH_NAMES = (
+    r"Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+    r"Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|"
+    r"Nov(?:ember)?|Dec(?:ember)?"
+)
+DEADLINE_DATE_PATTERN = re.compile(
+    rf"\b(?:\d{{1,2}}(?:st|nd|rd|th)?\s+(?:{DEADLINE_MONTH_NAMES})(?:,?\s+\d{{4}})?|"
+    rf"(?:{DEADLINE_MONTH_NAMES})\s+\d{{1,2}}(?:st|nd|rd|th)?(?:,?\s+\d{{4}})?|"
+    r"\d{4}-\d{1,2}-\d{1,2}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b",
+    re.IGNORECASE,
+)
+DEADLINE_CONTEXT_PATTERN = re.compile(
+    r"\b(?:application deadline|deadline|due date|last date|last day|final date|"
+    r"closing date|applications? close|applications? end|apply by|submit by)\b",
     re.IGNORECASE,
 )
 SECTION_NAMES_BY_INTENT = {
@@ -158,59 +237,137 @@ def _tokens(text: str) -> set[str]:
     }
 
 
-def map_gujarati_question(question: str) -> tuple[str, str | None]:
-    """Map common Gujarati scholarship questions to English retrieval queries."""
-    if not GUJARATI_SCRIPT_PATTERN.search(question):
+def _normalize_intent_text(value: str) -> str:
+    """Normalize Unicode spelling and punctuation for phrase matching only."""
+    normalized = unicodedata.normalize("NFC", value).casefold()
+    characters = [
+        " " if unicodedata.category(character).startswith(("P", "Z")) else character
+        for character in normalized
+    ]
+    return " ".join("".join(characters).split())
+
+
+def _contains_any_intent_term(text: str, terms: tuple[str, ...]) -> bool:
+    words = text.split()
+
+    def word_forms(word: str) -> set[str]:
+        forms = {word}
+        frontier = [word]
+        while frontier:
+            current = frontier.pop()
+            for suffix in LOCALIZED_WORD_SUFFIXES:
+                if current.endswith(suffix) and len(current) > len(suffix) + 1:
+                    stem = current[:-len(suffix)]
+                    if stem not in forms:
+                        forms.add(stem)
+                        frontier.append(stem)
+        return forms
+
+    word_variants = [word_forms(word) for word in words]
+    for term in terms:
+        term_words = _normalize_intent_text(term).split()
+        for start in range(len(words) - len(term_words) + 1):
+            if all(
+                term_word in word_variants[start + offset]
+                for offset, term_word in enumerate(term_words)
+            ):
+                return True
+    return False
+
+
+def _map_localized_question(
+    question: str,
+    script_pattern: re.Pattern[str],
+    terms: dict[str, tuple[str, ...]],
+) -> tuple[str, str | None]:
+    if not script_pattern.search(question):
         return question, None
 
-    text = " ".join(question.casefold().split())
-    has_scholarship = any(term in text for term in GUJARATI_SCHOLARSHIP_TERMS)
-    has_application = any(term in text for term in GUJARATI_APPLICATION_TERMS)
+    text = _normalize_intent_text(question)
+    has_scholarship = _contains_any_intent_term(text, terms["scholarship"])
+    has_application = _contains_any_intent_term(text, terms["application"])
+    has_documents = _contains_any_intent_term(text, terms["documents"])
+    has_required_cue = _contains_any_intent_term(text, terms["required_documents"])
+    has_amount_topic = has_scholarship or _contains_any_intent_term(text, terms["amount_topic"])
 
-    if (
-        any(term in text for term in GUJARATI_DOCUMENT_TERMS)
-        and any(term in text for term in GUJARATI_REQUIRED_TERMS)
+    # Check the more specific document intent first, since list questions may
+    # also contain terms used by application or amount questions.
+    if has_documents and has_required_cue:
+        intent = "documents"
+    elif _contains_any_intent_term(text, terms["deadline"]) or (
+        _contains_any_intent_term(text, terms["when"])
+        and has_application
     ):
-        return "What documents are required for the scholarship?", "documents"
-    if (
-        any(term in text for term in GUJARATI_DEADLINE_TERMS)
-        and (has_scholarship or has_application)
+        intent = "deadline"
+    elif _contains_any_intent_term(text, terms["amount"]) or (
+        has_amount_topic and _contains_any_intent_term(text, terms["quantity"])
     ):
-        return "What is the application deadline?", "deadline"
-    if (
-        any(term in text for term in GUJARATI_AMOUNT_TERMS)
-        and has_scholarship
-    ):
-        return "What is the scholarship amount?", "amount"
-    if any(term in text for term in GUJARATI_ELIGIBILITY_TERMS):
-        return "What are the eligibility criteria?", "eligibility"
-    if (
-        has_application
-        and any(term in text for term in GUJARATI_HOW_TO_APPLY_TERMS)
-    ):
-        return "How do I apply for the scholarship?", "how_to_apply"
-    return question, None
+        intent = "amount"
+    elif _contains_any_intent_term(text, terms["eligibility"]):
+        intent = "eligibility"
+    elif has_application and _contains_any_intent_term(text, terms["apply_procedure"]):
+        intent = "how_to_apply"
+    else:
+        return question, None
+
+    return CANONICAL_QUESTIONS_BY_INTENT[intent], intent
+
+
+def map_gujarati_question(question: str) -> tuple[str, str | None]:
+    """Map common Gujarati scholarship intents to English retrieval queries."""
+    return _map_localized_question(question, GUJARATI_SCRIPT_PATTERN, GUJARATI_INTENT_TERMS)
 
 
 def map_hindi_question(question: str) -> tuple[str, str | None]:
-    """Map common Hindi document questions to English retrieval terms."""
-    if not HINDI_SCRIPT_PATTERN.search(question):
-        return question, None
+    """Map common Hindi scholarship intents to English retrieval queries."""
+    return _map_localized_question(question, HINDI_SCRIPT_PATTERN, HINDI_INTENT_TERMS)
 
-    text = " ".join(question.casefold().split())
-    has_document_term = any(term in text for term in HINDI_DOCUMENT_TERMS)
-    has_required_term = any(term in text for term in HINDI_REQUIRED_DOCUMENT_TERMS)
-    if has_document_term and has_required_term:
-        return "What documents are required for the scholarship?", "documents"
+
+def map_english_question(question: str) -> tuple[str, str | None]:
+    """Normalize explicit English last-date questions to the deadline intent."""
+    text = _normalize_intent_text(question)
+    if (
+        _contains_any_intent_term(text, ENGLISH_LAST_DATE_TERMS)
+        and _contains_any_intent_term(text, ENGLISH_APPLICATION_TERMS)
+    ):
+        return CANONICAL_QUESTIONS_BY_INTENT["deadline"], "deadline"
     return question, None
 
 
 def map_question_for_retrieval(question: str) -> tuple[str, str | None]:
-    """Normalize supported Gujarati and Hindi intents for English document retrieval."""
-    mapped_question, intent = map_gujarati_question(question)
-    if intent is not None or mapped_question != question:
-        return mapped_question, intent
-    return map_hindi_question(question)
+    """Normalize supported Hindi and Gujarati intents for English document retrieval."""
+    for mapper in (map_gujarati_question, map_hindi_question):
+        mapped_question, intent = mapper(question)
+        if intent is not None:
+            return mapped_question, intent
+    return map_english_question(question)
+
+
+def _asks_deadline_and_eligibility(question: str) -> bool:
+    """Detect the supported compound question so the answer path can clarify."""
+    text = _normalize_intent_text(question)
+    language_terms = (HINDI_INTENT_TERMS, GUJARATI_INTENT_TERMS)
+    deadline_terms = (
+        "deadline", "application deadline", "last date", "due date", "closing date",
+        *(term for terms in language_terms for term in terms["deadline"]),
+    )
+    when_terms = (
+        "when", *(term for terms in language_terms for term in terms["when"]),
+    )
+    application_terms = (
+        "application", "apply", "submit",
+        *(term for terms in language_terms for term in terms["application"]),
+    )
+    eligibility_terms = (
+        "eligibility", "eligible", "qualify", "qualification", "criteria",
+        *(term for terms in language_terms for term in terms["eligibility"]),
+    )
+
+    has_deadline = _contains_any_intent_term(text, deadline_terms) or (
+        _contains_any_intent_term(text, when_terms)
+        and _contains_any_intent_term(text, application_terms)
+    )
+    return has_deadline and _contains_any_intent_term(text, eligibility_terms)
 
 
 def _translate_document_item(item: str, response_language: str) -> str:
@@ -508,7 +665,7 @@ def _mapped_section_response(
     passages: list[_RankedPassage],
     response_language: str,
 ) -> tuple[str, SourcePassage] | None:
-    """Quote the text under the section selected by a mapped Gujarati question."""
+    """Quote the text under the section selected by a mapped localized question."""
     section_names = SECTION_NAMES_BY_INTENT.get(intent or "")
     if not section_names:
         return None
@@ -541,6 +698,18 @@ def _mapped_section_response(
 
 def _has_explicit_amount(passages: list[_RankedPassage]) -> bool:
     return any(AMOUNT_VALUE_PATTERN.search(passage.source.text) for passage in passages)
+
+
+def _has_explicit_deadline_evidence(passages: list[_RankedPassage]) -> bool:
+    """Require both deadline context and a date value before answering a date query."""
+    return any(
+        DEADLINE_DATE_PATTERN.search(passage.body)
+        and (
+            _heading_name(passage.heading) in SECTION_NAMES_BY_INTENT["deadline"]
+            or DEADLINE_CONTEXT_PATTERN.search(passage.body)
+        )
+        for passage in passages
+    )
 
 
 def _extractive_support(
@@ -613,9 +782,19 @@ async def answer_document_question(
             message="This notice has no readable text. Scanned pages need OCR, which Saar doesn't support yet.",
         )
 
+    if _asks_deadline_and_eligibility(request.question):
+        return DocumentAnswerResponse(
+            answer=MULTIPLE_INTENTS_CLARIFICATION[request.response_language],
+            sources=[],
+            status="not_found",
+            mode="extractive",
+        )
+
     retrieval_question, mapped_intent = map_question_for_retrieval(request.question)
     ranked_passages = _rank_relevant_passages(retrieval_question, pages)
     if not ranked_passages:
+        return _not_found_response(response_language=request.response_language)
+    if mapped_intent == "deadline" and not _has_explicit_deadline_evidence(ranked_passages):
         return _not_found_response(response_language=request.response_language)
     passages = [passage.source for passage in ranked_passages]
 
