@@ -171,7 +171,21 @@ CANONICAL_QUESTIONS_BY_INTENT = {
     "eligibility": "What are the eligibility criteria?",
     "how_to_apply": "How do I apply for the scholarship?",
 }
-ENGLISH_LAST_DATE_TERMS = ("last date", "last day", "final date", "final day", "closing date")
+ENGLISH_DEADLINE_CUES = (
+    "application deadline",
+    "deadline for application",
+    "deadline for applications",
+    "deadline to apply",
+    "deadline for applying",
+    "application closing date",
+    "applications close",
+    "application closes",
+    "last date",
+    "last day",
+    "final date",
+    "final day",
+    "closing date",
+)
 ENGLISH_APPLICATION_TERMS = ("apply", "application", "applications", "submit", "submission")
 LOCALIZED_WORD_SUFFIXES = (
     "ઓના", "ઓમાં", "ઓથી", "ો", "ી", "ા", "ુ", "ે", "ૈ", "ૌ", "ઓ", "ની", "નો",
@@ -324,11 +338,16 @@ def map_hindi_question(question: str) -> tuple[str, str | None]:
 
 
 def map_english_question(question: str) -> tuple[str, str | None]:
-    """Normalize explicit English last-date questions to the deadline intent."""
+    """Normalize explicit application-deadline questions for section retrieval."""
     text = _normalize_intent_text(question)
+    has_application_context = _contains_any_intent_term(text, ENGLISH_APPLICATION_TERMS)
+    has_deadline_context = _contains_any_intent_term(text, ENGLISH_DEADLINE_CUES) or (
+        _contains_any_intent_term(text, ("deadline", "deadlines"))
+        and has_application_context
+    )
     if (
-        _contains_any_intent_term(text, ENGLISH_LAST_DATE_TERMS)
-        and _contains_any_intent_term(text, ENGLISH_APPLICATION_TERMS)
+        has_deadline_context
+        and has_application_context
     ):
         return CANONICAL_QUESTIONS_BY_INTENT["deadline"], "deadline"
     return question, None

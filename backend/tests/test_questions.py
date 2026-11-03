@@ -254,6 +254,37 @@ def test_last_date_to_apply_uses_deadline_from_actual_project_pdf() -> None:
     }]
 
 
+@pytest.mark.parametrize(
+    "question",
+    [
+        "What is the application deadline for this scholarship?",
+        "What is the deadline for scholarship applications?",
+        "When do scholarship applications close?",
+    ],
+)
+def test_application_deadline_phrasings_use_actual_project_pdf_section(
+    question: str,
+) -> None:
+    extracted_pages = sample_notice_pages()
+
+    assert qa.map_question_for_retrieval(question) == (
+        qa.CANONICAL_QUESTIONS_BY_INTENT["deadline"],
+        "deadline",
+    )
+
+    response = ask(question, extracted_pages)
+    result = response.json()
+
+    assert response.status_code == 200
+    assert result["status"] == "answered"
+    assert "30 November 2026" in result["answer"]
+    assert "fictional date" in result["answer"]
+    assert result["sources"] == [{
+        "page_number": 1,
+        "text": "Application Deadline\n30 November 2026 (fictional date)",
+    }]
+
+
 def test_last_date_to_apply_abstains_when_only_notice_date_is_present() -> None:
     response = ask(
         "What is the last date to apply?",
@@ -261,6 +292,22 @@ def test_last_date_to_apply_abstains_when_only_notice_date_is_present() -> None:
             "page_number": 2,
             "text": "Notice Date: 2 November 2026\n"
             "How to Apply\nSubmit the application through the student support office.",
+        }],
+    )
+    result = response.json()
+
+    assert response.status_code == 200
+    assert result["status"] == "not_found"
+    assert result["answer"] == qa.NOT_ENOUGH_INFORMATION["en"]
+    assert result["sources"] == []
+
+
+def test_application_deadline_question_abstains_without_deadline_evidence() -> None:
+    response = ask(
+        "What is the application deadline for this scholarship?",
+        [{
+            "page_number": 1,
+            "text": "The scholarship application is available through this sample notice.",
         }],
     )
     result = response.json()
@@ -875,7 +922,10 @@ def test_application_deadline_is_retrieved_from_the_deadline_section() -> None:
     assert result["status"] == "answered"
     assert "30 June 2026" in result["answer"]
     assert result["sources"] == [
-        {"page_number": 5, "text": "Applications close on 30 June 2026."}
+        {
+            "page_number": 5,
+            "text": "Application Deadline\nApplications close on 30 June 2026.",
+        }
     ]
 
 
