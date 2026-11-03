@@ -113,7 +113,7 @@ $env:SAAR_EVON_API_KEY = "your-server-key"
 uvicorn app.main:app --reload --port 8000
 ```
 
-When `SAAR_EVON_BASE_URL` is unset or the configured server fails, Saar does not contact another model provider. It returns a clearly labeled exact passage quote when retrieval finds a close match, or abstains when it cannot support the question. This fallback does not summarize or translate the notice; configure Evon for grounded natural-language answers in the selected language. The current workspace has no Evon server URL or credentials configured, so live model integration has not been verified.
+When `SAAR_EVON_BASE_URL` is unset or the configured server fails, Saar does not contact another model provider. It returns matching source text with its page number when retrieval finds enough support, or abstains when it cannot support the question. A small local Gujarati phrase map supports common scholarship questions about required documents, deadlines, amounts, eligibility, and application steps. Required-document answers use a local Hindi/Gujarati glossary for common document names; unknown names and the cited source passages remain in the source language. This is not general translation. The current workspace has no Evon server URL or credentials configured, so the extractive fallback is used.
 
 ### 2. Start the frontend
 
@@ -145,4 +145,4 @@ npm run build
 
 ## Current limitations
 
-PDFs with selectable text are extracted page by page. Blank or scanned PDFs receive a clear message because OCR is not supported yet. The fallback retrieval is lexical and quote-based; it is not a substitute for a configured Evon server. The speech endpoints are available to backend clients, but the frontend does not record or play voice yet. Prisma's REST endpoint is limited to 30-second clips. Saar does not independently verify notice details against an official source.
+PDFs with selectable text are extracted page by page. Blank or scanned PDFs receive a clear message because OCR is not supported yet. Without Evon, question answering is extractive and may abstain on paraphrases. Gujarati-to-English retrieval is limited to common scholarship question patterns, and local Hindi/Gujarati answer translation covers common document names rather than arbitrary prose. The speech endpoints are available to backend clients, but the frontend does not record or play voice yet. Prisma's REST endpoint is limited to 30-second clips. Saar does not independently verify notice details against an official source.

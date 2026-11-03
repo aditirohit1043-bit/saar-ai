@@ -38,6 +38,137 @@ function SparkleIcon() {
   );
 }
 
+function MicrophoneIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24" fill="none">
+      <rect x="9" y="3" width="6" height="12" rx="3" stroke="currentColor" strokeWidth="1.7" />
+      <path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3m-3.5 0h7" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function StopIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24" fill="none">
+      <rect x="6" y="6" width="12" height="12" rx="3" fill="currentColor" />
+    </svg>
+  );
+}
+
+function SpeakerIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24" fill="none">
+      <path d="M4 10v4h4l5 4V6l-5 4H4Z" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
+      <path d="M16 9a4 4 0 0 1 0 6m2.5-8.5a7.5 7.5 0 0 1 0 11" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+const MAX_RECORDING_SECONDS = 25;
+const RECORDING_MIME_TYPES = [
+  "audio/ogg;codecs=opus",
+  "audio/mp4;codecs=mp4a.40.2",
+  "audio/webm;codecs=opus",
+  "audio/webm",
+];
+
+function supportedRecordingType() {
+  if (typeof MediaRecorder === "undefined" || typeof MediaRecorder.isTypeSupported !== "function") {
+    return "";
+  }
+
+  return RECORDING_MIME_TYPES.find((mimeType) => MediaRecorder.isTypeSupported(mimeType)) || "";
+}
+
+function formatRecordingTime(seconds) {
+  const minutes = Math.floor(seconds / 60).toString().padStart(2, "0");
+  const remainingSeconds = (seconds % 60).toString().padStart(2, "0");
+  return `${minutes}:${remainingSeconds}`;
+}
+
+function encodeMonoWav(audioBuffer) {
+  const targetSampleRate = 16_000;
+  const frameCount = Math.ceil(audioBuffer.duration * targetSampleRate);
+  const dataLength = frameCount * 2;
+  const wav = new ArrayBuffer(44 + dataLength);
+  const view = new DataView(wav);
+  const writeLabel = (offset, label) => {
+    for (let index = 0; index < label.length; index += 1) {
+      view.setUint8(offset + index, label.charCodeAt(index));
+    }
+  };
+
+  writeLabel(0, "RIFF");
+  view.setUint32(4, 36 + dataLength, true);
+  writeLabel(8, "WAVE");
+  writeLabel(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, targetSampleRate, true);
+  view.setUint32(28, targetSampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeLabel(36, "data");
+  view.setUint32(40, dataLength, true);
+
+  const channels = Array.from({ length: audioBuffer.numberOfChannels }, (_, index) => audioBuffer.getChannelData(index));
+  const sampleRatio = audioBuffer.sampleRate / targetSampleRate;
+
+  for (let frame = 0; frame < frameCount; frame += 1) {
+    const sourcePosition = frame * sampleRatio;
+    const lowerIndex = Math.min(Math.floor(sourcePosition), audioBuffer.length - 1);
+    const upperIndex = Math.min(lowerIndex + 1, audioBuffer.length - 1);
+    const fraction = sourcePosition - lowerIndex;
+    const mixedSample = channels.reduce((sum, channel) => {
+      const interpolated = channel[lowerIndex] + (channel[upperIndex] - channel[lowerIndex]) * fraction;
+      return sum + interpolated;
+    }, 0) / channels.length;
+    const safeSample = Math.max(-1, Math.min(1, mixedSample));
+    view.setInt16(44 + frame * 2, safeSample < 0 ? safeSample * 0x8000 : safeSample * 0x7fff, true);
+  }
+
+  return new Blob([wav], { type: "audio/wav" });
+}
+
+async function convertWebmToWav(recording) {
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) {
+    throw new Error("This browser can't convert its recording format to a supported audio file.");
+  }
+
+  const audioContext = new AudioContextClass();
+  try {
+    const decoded = await audioContext.decodeAudioData(await recording.arrayBuffer());
+    return encodeMonoWav(decoded);
+  } finally {
+    await audioContext.close();
+  }
+}
+
+async function prepareAudioUpload(recording) {
+  const mimeType = (recording.type || "").split(";")[0].toLowerCase();
+  const extensions = {
+    "audio/aac": "aac",
+    "audio/flac": "flac",
+    "audio/mp4": "m4a",
+    "audio/mpeg": "mp3",
+    "audio/ogg": "ogg",
+    "audio/wav": "wav",
+    "audio/x-wav": "wav",
+  };
+
+  if (extensions[mimeType]) {
+    return { blob: recording, filename: `saar-question.${extensions[mimeType]}` };
+  }
+
+  if (mimeType.includes("webm")) {
+    return { blob: await convertWebmToWav(recording), filename: "saar-question.wav" };
+  }
+
+  throw new Error("This browser produced an audio format Saar can't send yet. Try another browser or type your question.");
+}
+
 function App() {
   const [language, setLanguage] = useState("en");
   const [apiStatus, setApiStatus] = useState("checking");
@@ -48,8 +179,31 @@ function App() {
   const [messages, setMessages] = useState([]);
   const [question, setQuestion] = useState("");
   const [isAsking, setIsAsking] = useState(false);
+  const [voiceAvailability, setVoiceAvailability] = useState({ supported: null, reason: "" });
+  const [voiceStatus, setVoiceStatus] = useState("idle");
+  const [voiceSeconds, setVoiceSeconds] = useState(0);
+  const [voiceError, setVoiceError] = useState("");
+  const [transcriptReady, setTranscriptReady] = useState(false);
+  const [speechPlayback, setSpeechPlayback] = useState({
+    messageId: null,
+    requestId: 0,
+    status: "idle",
+    url: "",
+    error: "",
+  });
   const fileInputRef = useRef(null);
   const conversationEndRef = useRef(null);
+  const questionInputRef = useRef(null);
+  const mediaRecorderRef = useRef(null);
+  const mediaStreamRef = useRef(null);
+  const recordingChunksRef = useRef([]);
+  const recordingStartedAtRef = useRef(0);
+  const recordingIntervalRef = useRef(null);
+  const recordingTimeoutRef = useRef(null);
+  const recordingErrorRef = useRef(false);
+  const speechAudioRef = useRef(null);
+  const speechAudioUrlRef = useRef("");
+  const speechRequestIdRef = useRef(0);
 
   useEffect(() => {
     let isCurrent = true;
@@ -81,27 +235,333 @@ function App() {
     conversationEndRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
   }, [messages]);
 
+  useEffect(() => {
+    if (!window.isSecureContext) {
+      setVoiceAvailability({ supported: false, reason: "Voice input needs a secure connection, such as HTTPS or localhost." });
+    } else if (!navigator.mediaDevices?.getUserMedia) {
+      setVoiceAvailability({ supported: false, reason: "Microphone access isn't available in this browser." });
+    } else if (typeof window.MediaRecorder !== "function") {
+      setVoiceAvailability({ supported: false, reason: "Audio recording isn't supported in this browser." });
+    } else {
+      setVoiceAvailability({ supported: true, reason: "" });
+    }
+
+    return () => {
+      window.clearInterval(recordingIntervalRef.current);
+      window.clearTimeout(recordingTimeoutRef.current);
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+        mediaRecorderRef.current.ondataavailable = null;
+        mediaRecorderRef.current.onstop = null;
+        mediaRecorderRef.current.onerror = null;
+        mediaRecorderRef.current.stop();
+      }
+      mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+      speechAudioRef.current?.pause();
+      if (speechAudioUrlRef.current) {
+        URL.revokeObjectURL(speechAudioUrlRef.current);
+      }
+    };
+  }, []);
+
   const statusText = {
     checking: "Checking connection",
     connected: "Saar is ready",
     offline: "API is offline",
   }[apiStatus];
 
-  const canAskAboutDocument = Boolean(uploadedDocument?.extracted_text?.trim()) && !isUploading && !isAsking;
+  const hasReadableDocument = Boolean(uploadedDocument?.extracted_text?.trim());
+  const canAskAboutDocument = hasReadableDocument && !isUploading && !isAsking && voiceStatus === "idle";
+  const canStartRecording = hasReadableDocument && !isUploading && !isAsking && voiceStatus === "idle" && voiceAvailability.supported === true;
+
+  function clearRecordingTimers() {
+    window.clearInterval(recordingIntervalRef.current);
+    window.clearTimeout(recordingTimeoutRef.current);
+    recordingIntervalRef.current = null;
+    recordingTimeoutRef.current = null;
+  }
+
+  function releaseMicrophone() {
+    mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+    mediaStreamRef.current = null;
+  }
+
+  function stopVoiceRecording() {
+    clearRecordingTimers();
+    const recorder = mediaRecorderRef.current;
+    if (recorder && recorder.state !== "inactive") {
+      recorder.stop();
+    } else {
+      releaseMicrophone();
+      setVoiceStatus("idle");
+    }
+  }
+
+  async function transcribeRecording(recording) {
+    try {
+      const preparedAudio = await prepareAudioUpload(recording);
+      const formData = new FormData();
+      formData.append("audio_file", preparedAudio.blob, preparedAudio.filename);
+
+      const response = await fetch("/api/speech/transcribe", {
+        method: "POST",
+        body: formData,
+      });
+      const result = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        if (response.status === 503) {
+          throw new Error("Voice transcription isn't available right now. You can type your question instead.");
+        }
+        if (response.status === 504) {
+          throw new Error("That took too long to transcribe. Try a shorter recording or type your question.");
+        }
+        throw new Error(
+          typeof result?.detail === "string"
+            ? result.detail
+            : "Saar couldn't transcribe that recording. Please try again or type your question.",
+        );
+      }
+
+      const transcript = typeof result?.transcript === "string" ? result.transcript.trim() : "";
+      if (!transcript || result?.status === "no_speech") {
+        throw new Error("I couldn't hear clear speech in that recording. Try again or type your question.");
+      }
+
+      setQuestion(transcript);
+      setTranscriptReady(true);
+      setVoiceError("");
+      window.requestAnimationFrame(() => questionInputRef.current?.focus());
+    } catch (error) {
+      const friendlyError = error instanceof TypeError
+        ? "Saar couldn't reach voice transcription. Please check your connection or type your question."
+        : error instanceof Error && error.message
+          ? error.message
+          : "Saar couldn't transcribe that recording. Please try again or type your question.";
+      setVoiceError(friendlyError);
+      setTranscriptReady(false);
+    } finally {
+      setVoiceStatus("idle");
+      setVoiceSeconds(0);
+    }
+  }
+
+  async function startVoiceRecording() {
+    if (!canStartRecording) {
+      return;
+    }
+
+    setVoiceError("");
+    setTranscriptReady(false);
+    setVoiceStatus("requesting");
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaStreamRef.current = stream;
+
+      let recorder;
+      const mimeType = supportedRecordingType();
+      try {
+        recorder = mimeType
+          ? new MediaRecorder(stream, { mimeType, audioBitsPerSecond: 64_000 })
+          : new MediaRecorder(stream);
+      } catch {
+        recorder = new MediaRecorder(stream);
+      }
+
+      mediaRecorderRef.current = recorder;
+      recordingChunksRef.current = [];
+      recordingErrorRef.current = false;
+      recorder.ondataavailable = (event) => {
+        if (event.data?.size) {
+          recordingChunksRef.current.push(event.data);
+        }
+      };
+      recorder.onerror = () => {
+        recordingErrorRef.current = true;
+        setVoiceError("The recording stopped unexpectedly. Please try again or type your question.");
+        if (recorder.state !== "inactive") {
+          recorder.stop();
+        }
+      };
+      recorder.onstop = () => {
+        clearRecordingTimers();
+        mediaRecorderRef.current = null;
+        releaseMicrophone();
+
+        if (recordingErrorRef.current) {
+          recordingErrorRef.current = false;
+          setVoiceStatus("idle");
+          return;
+        }
+
+        const chunks = recordingChunksRef.current;
+        recordingChunksRef.current = [];
+        const recordedType = recorder.mimeType || chunks[0]?.type || "";
+        const recording = new Blob(chunks, { type: recordedType });
+        if (!recording.size) {
+          setVoiceStatus("idle");
+          setVoiceError("No audio was captured. Please try recording again.");
+          return;
+        }
+
+        setVoiceStatus("transcribing");
+        void transcribeRecording(recording);
+      };
+
+      recorder.start();
+      recordingStartedAtRef.current = Date.now();
+      setVoiceSeconds(0);
+      setVoiceStatus("recording");
+      recordingIntervalRef.current = window.setInterval(() => {
+        const elapsed = Math.floor((Date.now() - recordingStartedAtRef.current) / 1000);
+        setVoiceSeconds(Math.min(elapsed, MAX_RECORDING_SECONDS));
+      }, 500);
+      recordingTimeoutRef.current = window.setTimeout(stopVoiceRecording, MAX_RECORDING_SECONDS * 1000);
+    } catch (error) {
+      releaseMicrophone();
+      mediaRecorderRef.current = null;
+      setVoiceStatus("idle");
+      const errorName = error instanceof DOMException ? error.name : "";
+      if (errorName === "NotAllowedError" || errorName === "SecurityError") {
+        setVoiceError("Microphone access was blocked. Allow microphone permission in your browser, or type your question.");
+      } else if (errorName === "NotFoundError") {
+        setVoiceError("No microphone was found. Connect one or type your question instead.");
+      } else {
+        setVoiceError("Saar couldn't start the microphone. Please try again or type your question.");
+      }
+    }
+  }
+
+  function handleVoiceButton() {
+    if (voiceStatus === "recording") {
+      stopVoiceRecording();
+    } else {
+      void startVoiceRecording();
+    }
+  }
+
+  function clearSpeechAudio() {
+    speechRequestIdRef.current += 1;
+    if (speechAudioRef.current) {
+      speechAudioRef.current.pause();
+      speechAudioRef.current.currentTime = 0;
+      speechAudioRef.current = null;
+    }
+    if (speechAudioUrlRef.current) {
+      URL.revokeObjectURL(speechAudioUrlRef.current);
+      speechAudioUrlRef.current = "";
+    }
+    setSpeechPlayback({
+      messageId: null,
+      requestId: speechRequestIdRef.current,
+      status: "idle",
+      url: "",
+      error: "",
+    });
+  }
+
+  async function handleReadAloud(message) {
+    if (speechPlayback.status === "loading") {
+      return;
+    }
+
+    if (speechPlayback.messageId === message.id && speechPlayback.status === "playing") {
+      speechAudioRef.current?.pause();
+      return;
+    }
+
+    if (speechPlayback.messageId === message.id && speechPlayback.status === "ready" && speechAudioRef.current) {
+      if (speechAudioRef.current.ended) {
+        speechAudioRef.current.currentTime = 0;
+      }
+      try {
+        await speechAudioRef.current.play();
+      } catch {
+        setSpeechPlayback((current) => ({
+          ...current,
+          status: "error",
+          error: "Audio didn't start. Use the audio controls to try again.",
+        }));
+      }
+      return;
+    }
+
+    if (speechAudioRef.current) {
+      speechAudioRef.current.pause();
+      speechAudioRef.current.currentTime = 0;
+      speechAudioRef.current = null;
+    }
+    if (speechAudioUrlRef.current) {
+      URL.revokeObjectURL(speechAudioUrlRef.current);
+      speechAudioUrlRef.current = "";
+    }
+
+    const requestId = speechRequestIdRef.current + 1;
+    speechRequestIdRef.current = requestId;
+    setSpeechPlayback({ messageId: message.id, requestId, status: "loading", url: "", error: "" });
+
+    try {
+      const response = await fetch("/api/speech/synthesize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: message.answer, response_language: language }),
+      });
+
+      if (!response.ok) {
+        const result = await response.json().catch(() => null);
+        if (response.status === 503) {
+          throw new Error("Read-aloud isn't available right now. You can still read this answer.");
+        }
+        if (response.status === 504) {
+          throw new Error("Speech generation took too long. Please try again.");
+        }
+        throw new Error(
+          typeof result?.detail === "string"
+            ? result.detail
+            : "Saar couldn't prepare audio for this answer. Please try again.",
+        );
+      }
+
+      const audioBlob = await response.blob();
+      if (!audioBlob.size || !audioBlob.type.toLowerCase().startsWith("audio/")) {
+        throw new Error("Saar received an audio file it couldn't play. Please try again.");
+      }
+      if (requestId !== speechRequestIdRef.current) {
+        return;
+      }
+
+      const audioUrl = URL.createObjectURL(audioBlob);
+      speechAudioUrlRef.current = audioUrl;
+      setSpeechPlayback({ messageId: message.id, requestId, status: "ready", url: audioUrl, error: "" });
+    } catch (error) {
+      if (requestId !== speechRequestIdRef.current) {
+        return;
+      }
+      const friendlyError = error instanceof TypeError
+        ? "Saar couldn't reach read-aloud. Please check your connection and try again."
+        : error instanceof Error && error.message
+          ? error.message
+          : "Saar couldn't prepare audio for this answer. Please try again.";
+      setSpeechPlayback({ messageId: message.id, requestId, status: "error", url: "", error: friendlyError });
+    }
+  }
 
   async function handleDocumentSelected(event) {
     const selectedFile = event.currentTarget.files?.[0];
     event.currentTarget.value = "";
 
-    if (!selectedFile) {
+    if (!selectedFile || voiceStatus !== "idle") {
       return;
     }
 
+    clearSpeechAudio();
     setUploadedDocument(null);
     setIsPreviewOpen(false);
     setUploadError("");
     setMessages([]);
     setQuestion("");
+    setVoiceError("");
+    setTranscriptReady(false);
     setIsUploading(true);
 
     const formData = new FormData();
@@ -143,13 +603,14 @@ function App() {
     event.preventDefault();
     const questionText = question.trim();
 
-    if (!questionText || !uploadedDocument?.pages?.length || isUploading || isAsking) {
+    if (!questionText || !uploadedDocument?.pages?.length || isUploading || isAsking || voiceStatus !== "idle") {
       return;
     }
 
     const messageId = Date.now();
     const answerId = `answer-${messageId}`;
     setQuestion("");
+    setTranscriptReady(false);
     setIsAsking(true);
     setMessages((currentMessages) => [
       ...currentMessages,
@@ -269,6 +730,7 @@ function App() {
                     type="button"
                     onClick={() => fileInputRef.current?.click()}
                     aria-describedby="upload-guidance"
+                    disabled={voiceStatus !== "idle"}
                   >
                     <span className="document-illustration"><DocumentIcon /></span>
                     <span className="upload-title">{uploadedDocument ? "Add another notice" : "Bring your notice here"}</span>
@@ -431,6 +893,74 @@ function App() {
                         </div>
                       )}
 
+                      {!message.pending && !message.error && (
+                        <div className="answer-audio-actions">
+                          <button
+                            className="read-aloud-button"
+                            type="button"
+                            onClick={() => handleReadAloud(message)}
+                            disabled={speechPlayback.status === "loading"}
+                            aria-label={
+                              speechPlayback.messageId === message.id && speechPlayback.status === "playing"
+                                ? "Stop reading Saar's answer"
+                                : speechPlayback.messageId === message.id && speechPlayback.status === "loading"
+                                  ? "Preparing audio for Saar's answer"
+                                  : speechPlayback.messageId === message.id && speechPlayback.status === "ready"
+                                    ? "Play Saar's answer"
+                                    : "Read Saar's answer aloud"
+                            }
+                            aria-pressed={speechPlayback.messageId === message.id && speechPlayback.status === "playing"}
+                          >
+                            <SpeakerIcon />
+                            <span>
+                              {speechPlayback.messageId === message.id && speechPlayback.status === "loading"
+                                ? "Preparing audio…"
+                                : speechPlayback.messageId === message.id && speechPlayback.status === "playing"
+                                  ? "Stop reading"
+                                  : speechPlayback.messageId === message.id && speechPlayback.status === "ready"
+                                    ? "Play answer"
+                                    : "Read aloud"}
+                            </span>
+                          </button>
+
+                          {speechPlayback.messageId === message.id && speechPlayback.url && (
+                            <audio
+                              ref={speechAudioRef}
+                              className="answer-audio-player"
+                              src={speechPlayback.url}
+                              controls
+                              autoPlay
+                              preload="none"
+                              aria-label="Saar answer audio controls"
+                              onPlay={() => setSpeechPlayback((current) => (
+                                current.requestId === speechPlayback.requestId
+                                  ? { ...current, status: "playing" }
+                                  : current
+                              ))}
+                              onPause={() => setSpeechPlayback((current) => (
+                                current.requestId === speechPlayback.requestId && current.status === "playing"
+                                  ? { ...current, status: "ready" }
+                                  : current
+                              ))}
+                              onEnded={() => setSpeechPlayback((current) => (
+                                current.requestId === speechPlayback.requestId
+                                  ? { ...current, status: "ready" }
+                                  : current
+                              ))}
+                              onError={() => setSpeechPlayback((current) => (
+                                current.requestId === speechPlayback.requestId
+                                  ? { ...current, status: "error", error: "This browser couldn't play the generated audio." }
+                                  : current
+                              ))}
+                            />
+                          )}
+
+                          {speechPlayback.messageId === message.id && speechPlayback.error && (
+                            <p className="voice-error answer-audio-error" role="alert">{speechPlayback.error}</p>
+                          )}
+                        </div>
+                      )}
+
                       {message.notice && !message.pending && (
                         <p className="answer-note">{message.notice}</p>
                       )}
@@ -464,10 +994,14 @@ function App() {
             <div className="composer-wrap">
               <form className="composer" onSubmit={handleQuestionSubmit} aria-label="Ask about your notice">
                 <input
+                  ref={questionInputRef}
                   className="composer-input"
                   type="text"
                   value={question}
-                  onChange={(event) => setQuestion(event.target.value)}
+                  onChange={(event) => {
+                    setQuestion(event.target.value);
+                    setTranscriptReady(false);
+                  }}
                   placeholder={
                     !uploadedDocument?.extracted_text
                       ? "Upload a readable PDF to begin"
@@ -479,6 +1013,28 @@ function App() {
                   disabled={!canAskAboutDocument}
                 />
                 <button
+                  className={`voice-button${voiceStatus === "recording" ? " is-recording" : ""}`}
+                  type="button"
+                  onClick={handleVoiceButton}
+                  disabled={
+                    voiceStatus === "requesting" ||
+                    voiceStatus === "transcribing" ||
+                    (voiceStatus !== "recording" && !canStartRecording)
+                  }
+                  aria-label={voiceStatus === "recording" ? "Stop recording question" : "Record a voice question"}
+                  aria-pressed={voiceStatus === "recording"}
+                  aria-describedby="voice-guidance"
+                  title={voiceStatus === "recording" ? "Stop recording" : "Record a voice question"}
+                >
+                  {voiceStatus === "transcribing" ? (
+                    <span className="voice-spinner" aria-hidden="true" />
+                  ) : voiceStatus === "recording" ? (
+                    <StopIcon />
+                  ) : (
+                    <MicrophoneIcon />
+                  )}
+                </button>
+                <button
                   className="send-button"
                   type="submit"
                   aria-label="Send question"
@@ -489,6 +1045,40 @@ function App() {
                   </svg>
                 </button>
               </form>
+              <span className="sr-only" id="voice-guidance">
+                Record up to {MAX_RECORDING_SECONDS} seconds. Saar will transcribe it into this editable question field for you to review before sending.
+              </span>
+              <span className="sr-only" role="status" aria-live="polite">
+                {voiceStatus === "requesting"
+                  ? "Waiting for microphone permission."
+                  : voiceStatus === "recording"
+                    ? "Recording started. Activate stop recording when you are finished."
+                    : ""}
+              </span>
+              <div className="voice-feedback" aria-live="off">
+                {voiceStatus === "requesting" && <p className="voice-status">Waiting for microphone permission…</p>}
+                {voiceStatus === "recording" && (
+                  <p className="voice-status recording-status">
+                    <span className="recording-dot" aria-hidden="true" />
+                    Recording {formatRecordingTime(voiceSeconds)} / {formatRecordingTime(MAX_RECORDING_SECONDS)}
+                    <span className="recording-hint">Select stop when you're done speaking.</span>
+                  </p>
+                )}
+                {voiceStatus === "transcribing" && (
+                  <p className="voice-status" role="status" aria-live="polite">
+                    <span className="voice-spinner" aria-hidden="true" /> Saar is transcribing your question…
+                  </p>
+                )}
+                {transcriptReady && voiceStatus === "idle" && (
+                  <p className="voice-success" role="status" aria-live="polite">
+                    Transcript ready. Review or edit it above, then send when you're ready.
+                  </p>
+                )}
+                {voiceError && <p className="voice-error" role="alert">{voiceError}</p>}
+                {voiceAvailability.supported === false && hasReadableDocument && (
+                  <p className="voice-unavailable" role="status">{voiceAvailability.reason} You can type your question instead.</p>
+                )}
+              </div>
               <p className="composer-caption">
                 {uploadedDocument?.extracted_text
                   ? "Answers are grounded in the text of your notice."
