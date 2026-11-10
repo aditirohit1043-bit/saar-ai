@@ -1,5 +1,6 @@
 fastapi>=0.115,<1.0
 uvicorn>=0.30,<1.0
+# PyMuPDF renders OCR candidate pages; the local Tesseract CLI is installed at system level.
 pymupdf>=1.24,<2.0
 python-multipart>=0.0.9,<1.0
 httpx>=0.27,<1.0

@@ -566,6 +566,7 @@ function App() {
 
     const formData = new FormData();
     formData.append("file", selectedFile);
+    formData.append("response_language", language);
 
     try {
       const response = await fetch("/api/documents/upload", {

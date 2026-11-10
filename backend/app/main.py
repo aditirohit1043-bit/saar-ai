@@ -1,9 +1,13 @@
 """FastAPI application for the Saar project."""
 
 import mimetypes
+import os
+import shutil
+import subprocess
+from pathlib import Path
 
 import pymupdf
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 
 from .gnani_speech import GnaniUnavailable, synthesize_with_timbre, transcribe_with_prisma
@@ -21,6 +25,84 @@ MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 MAX_AUDIO_UPLOAD_BYTES = 10 * 1024 * 1024
 SUPPORTED_AUDIO_EXTENSIONS = {".wav", ".mp3", ".ogg", ".flac", ".aac", ".m4a"}
 PDF_HEADER = b"%PDF-"
+OCR_DPI = 200
+MIN_SELECTABLE_TEXT_FOR_OCR = 80
+OCR_LANGUAGE_BY_RESPONSE_LANGUAGE = {"en": "eng", "gu": "guj", "hi": "hin"}
+WINDOWS_TESSERACT_PATH = Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe")
+OCR_TIMEOUT_SECONDS = 60
+
+
+class OCRUnavailableError(RuntimeError):
+    """Raised when the local Tesseract executable cannot be found."""
+
+
+class OCRLanguageDataError(RuntimeError):
+    """Raised when Tesseract is missing one of the requested language packs."""
+
+
+class OCRProcessingError(RuntimeError):
+    """Raised when Tesseract could not process a rendered page."""
+
+
+def _tesseract_executable() -> str:
+    configured_path = os.environ.get("SAAR_TESSERACT_CMD")
+    if configured_path:
+        resolved_path = shutil.which(configured_path)
+        if resolved_path:
+            return resolved_path
+        if Path(configured_path).is_file():
+            return configured_path
+        raise OCRUnavailableError("The configured Tesseract executable was not found.")
+
+    path_from_path = shutil.which("tesseract")
+    if path_from_path:
+        return path_from_path
+    if WINDOWS_TESSERACT_PATH.is_file():
+        return str(WINDOWS_TESSERACT_PATH)
+    raise OCRUnavailableError("Tesseract was not found on PATH or at its Windows default path.")
+
+
+def _ocr_language_argument(response_language: str) -> str:
+    selected_language = OCR_LANGUAGE_BY_RESPONSE_LANGUAGE.get(response_language, "eng")
+    return selected_language if selected_language == "eng" else f"{selected_language}+eng"
+
+
+def _ocr_page_text(page: pymupdf.Page, response_language: str) -> str:
+    """Render one PDF page and recognize it with the installed local Tesseract binary."""
+    executable = _tesseract_executable()
+    try:
+        image_bytes = page.get_pixmap(dpi=OCR_DPI, alpha=False).tobytes("png")
+        result = subprocess.run(
+            [
+                executable,
+                "stdin",
+                "-",
+                "-l",
+                _ocr_language_argument(response_language),
+                "--psm",
+                "3",
+            ],
+            input=image_bytes,
+            capture_output=True,
+            timeout=OCR_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise OCRProcessingError("Tesseract timed out while reading the page.") from error
+    except (OSError, RuntimeError, ValueError) as error:
+        raise OCRProcessingError("Tesseract could not process the rendered page.") from error
+
+    if result.returncode != 0:
+        error_output = result.stderr.decode("utf-8", errors="replace").casefold()
+        if "failed loading language" in error_output or "error opening data file" in error_output:
+            raise OCRLanguageDataError("A requested Tesseract language pack is missing.")
+        raise OCRProcessingError("Tesseract returned an OCR error.")
+
+    return result.stdout.decode("utf-8", errors="replace").strip()
+
+
+def _page_number_list(page_numbers: list[int]) -> str:
+    return ", ".join(str(page_number) for page_number in sorted(set(page_numbers)))
 
 
 @app.get("/api/health", tags=["health"])
@@ -30,8 +112,11 @@ async def health_check() -> dict[str, str]:
 
 
 @app.post("/api/documents/upload", tags=["documents"])
-async def upload_document(file: UploadFile = File(...)) -> dict[str, object]:
-    """Extract selectable text from an uploaded PDF without storing it."""
+async def upload_document(
+    file: UploadFile = File(...),
+    response_language: str = Form("en"),
+) -> dict[str, object]:
+    """Extract selectable text and locally OCR scanned pages without storing the PDF."""
     try:
         contents = await file.read(MAX_UPLOAD_BYTES + 1)
 
@@ -70,15 +155,40 @@ async def upload_document(file: UploadFile = File(...)) -> dict[str, object]:
                 )
 
             pages: list[dict[str, object]] = []
-            image_only_pages: list[int] = []
+            ocr_failed_pages: list[int] = []
+            ocr_unreadable_pages: list[int] = []
+            ocr_failure_kinds: set[str] = set()
 
             try:
                 for page_number, page in enumerate(document, start=1):
                     page_text = page.get_text("text").strip()
-                    pages.append({"page_number": page_number, "text": page_text})
-
-                    if not page_text and page.get_images(full=True):
-                        image_only_pages.append(page_number)
+                    page_ocr_used = False
+                    if (
+                        len(page_text) < MIN_SELECTABLE_TEXT_FOR_OCR
+                        and page.get_images(full=True)
+                    ):
+                        try:
+                            ocr_text = _ocr_page_text(page, response_language)
+                        except OCRUnavailableError:
+                            ocr_failed_pages.append(page_number)
+                            ocr_failure_kinds.add("tesseract")
+                        except OCRLanguageDataError:
+                            ocr_failed_pages.append(page_number)
+                            ocr_failure_kinds.add("language_data")
+                        except Exception:
+                            ocr_failed_pages.append(page_number)
+                            ocr_failure_kinds.add("processing")
+                        else:
+                            if ocr_text:
+                                page_text = ocr_text
+                                page_ocr_used = True
+                            else:
+                                ocr_unreadable_pages.append(page_number)
+                    pages.append({
+                        "page_number": page_number,
+                        "text": page_text,
+                        "ocr_used": page_ocr_used,
+                    })
             except (pymupdf.FileDataError, RuntimeError, ValueError) as error:
                 raise HTTPException(
                     status_code=400,
@@ -95,28 +205,57 @@ async def upload_document(file: UploadFile = File(...)) -> dict[str, object]:
                     "page_count": 0,
                     "extracted_text": "",
                     "pages": [],
+                    "ocr_used": False,
                     "status": "empty",
                     "message": "This PDF doesn't contain any pages to read.",
                 }
 
-            if not extracted_text:
-                if image_only_pages:
-                    message = (
-                        "This PDF appears to be scanned or image-only. "
-                        "OCR isn't supported yet, so Saar couldn't extract text."
+            ocr_problem_pages = _page_number_list(
+                ocr_failed_pages + ocr_unreadable_pages
+            )
+            if ocr_problem_pages:
+                if "tesseract" in ocr_failure_kinds:
+                    setup_guidance = (
+                        " Install Tesseract or set SAAR_TESSERACT_CMD to its executable path, "
+                        "then restart Saar."
                     )
+                    failure_status = "ocr_unavailable"
+                elif "language_data" in ocr_failure_kinds:
+                    setup_guidance = (
+                        " Install the selected language data (eng, hin, and guj), then retry."
+                    )
+                    failure_status = "ocr_unavailable"
+                elif ocr_failed_pages:
+                    setup_guidance = " Check Tesseract and try a clearer scan."
+                    failure_status = "ocr_failed"
+                else:
+                    setup_guidance = " Try a clearer scan."
+                    failure_status = "ocr_failed"
+
+                if extracted_text:
+                    message = (
+                        "Saar extracted some text, but couldn't read scanned page(s) "
+                        f"{ocr_problem_pages}." + setup_guidance
+                    )
+                    status = "partial"
+                elif ocr_failed_pages:
+                    message = (
+                        "Saar couldn't run local OCR on scanned page(s) "
+                        f"{ocr_problem_pages}." + setup_guidance
+                    )
+                    status = failure_status
                 else:
                     message = (
-                        "We couldn't find selectable text in this PDF. It may be blank or scanned. "
-                        "OCR isn't supported yet."
+                        "Local OCR couldn't recognize readable text on scanned page(s) "
+                        f"{ocr_problem_pages}. Try a clearer scan."
                     )
-                status = "no_text"
-            elif image_only_pages:
+                    status = "ocr_failed"
+            elif not extracted_text:
                 message = (
-                    "Text was extracted, but some pages appear to be scanned or image-only. "
-                    "OCR isn't supported yet for those pages."
+                    "We couldn't find readable text or scanned images in this PDF. "
+                    "It may be blank or contain unsupported vector artwork."
                 )
-                status = "partial"
+                status = "no_text"
             else:
                 message = None
                 status = "success"
@@ -126,6 +265,7 @@ async def upload_document(file: UploadFile = File(...)) -> dict[str, object]:
                 "page_count": page_count,
                 "extracted_text": extracted_text,
                 "pages": pages,
+                "ocr_used": any(page["ocr_used"] for page in pages),
                 "status": status,
                 "message": message,
             }

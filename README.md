@@ -1,6 +1,6 @@
 # Saar
 
-Saar is a friendly document assistant that helps students and citizens make sense of official notices in English, Hindi, and Gujarati. Upload a text-based PDF, ask a question about it, and get an answer grounded in relevant passages with page references.
+Saar is a friendly document assistant that helps students and citizens make sense of official notices in English, Hindi, and Gujarati. Upload a text-based or scanned PDF, ask a question about it, and get an answer grounded in relevant passages with page references. Scanned-page OCR runs locally when Tesseract is installed.
 
 ## The problem Saar addresses
 
@@ -36,10 +36,10 @@ flowchart LR
 
 ### Document Q&A workflow
 
-1. The browser sends the selected PDF to FastAPI. The backend validates and reads it in memory, then PyMuPDF extracts selectable text page by page.
+1. The browser sends the selected PDF to FastAPI. The backend validates and reads it in memory. PyMuPDF extracts selectable text page by page and uses local Tesseract OCR as a fallback for image pages with empty or very short text.
 2. The browser keeps the extracted page text for the current document session and sends that text with each question and the selected response language.
 3. Saar normalizes supported Hindi and Gujarati question patterns, retrieves relevant document passages, and includes their page numbers in the response. If the text does not support an answer, Saar abstains.
-4. If a compatible self-hosted Evon endpoint is configured, it can generate the answer from the retrieved passages. Otherwise Saar uses its local, extractive response path. Saar does not independently verify the notice against an official source.
+4. Saar builds deterministic answers from the retrieved notice text and abstains when it cannot find supporting evidence. Document Q&A does not currently call Evon because generated answers are not independently validated against the cited text. Saar does not independently verify the notice against an official source.
 
 PDFs and extracted text are not permanently stored by the backend. The Q&A endpoint is stateless: each question request contains the current document's extracted page text.
 
@@ -81,6 +81,21 @@ saar/
 - Node.js 20.19+ or 22.12+
 - npm (included with Node.js)
 - Python 3.10+
+
+### Local OCR setup for Windows
+
+OCR is optional for selectable-text PDFs. To read scanned pages, install Tesseract 5 for Windows using the [Windows installation guidance](https://tesseract-ocr.github.io/tessdoc/Installation.html#windows) and the [UB Mannheim installer](https://github.com/UB-Mannheim/tesseract/wiki). During setup, include the `eng`, `hin`, and `guj` language data files. If adding them later, place `eng.traineddata`, `hin.traineddata`, and `guj.traineddata` in Tesseract's `tessdata` folder, usually `C:\Program Files\Tesseract-OCR\tessdata`.
+
+Add the Tesseract installation directory (usually `C:\Program Files\Tesseract-OCR`) to `PATH`, then open a new PowerShell window and verify the installation:
+
+```powershell
+tesseract --version
+tesseract --list-langs
+```
+
+The language list should include `eng`, `hin`, and `guj`. Saar looks for `tesseract` on `PATH` or at `C:\Program Files\Tesseract-OCR\tesseract.exe`. For a different location, set `SAAR_TESSERACT_CMD` to the executable path before starting FastAPI. Restart the backend after installing Tesseract. PyMuPDF renders each candidate page locally and Saar pipes that image to the local Tesseract command; no external OCR service or additional Python OCR package is used. OCR uses the selected conversation language with English as a fallback. See the [PyMuPDF page rendering documentation](https://pymupdf.readthedocs.io/en/latest/page.html#get-pixmap) and [Tesseract installation and CLI documentation](https://tesseract-ocr.github.io/tessdoc/Installation.html) for details.
+
+To smoke-test OCR, start Saar, select a conversation language, then upload a scanned PDF with clear printed text. The upload response includes an `ocr_used` flag overall and for each page; image-only pages that Tesseract couldn't read also include an explanatory message.
 
 ## Run locally
 
@@ -143,7 +158,7 @@ Open the local URL printed by Vite, usually <http://localhost:5173>. Vite forwar
 | Endpoint | Request | Behavior |
 | --- | --- | --- |
 | `GET /api/health` | None | Returns `{"status":"ok"}` when FastAPI is responding. |
-| `POST /api/documents/upload` | Multipart field `file` containing a PDF | Extracts text per page and returns the filename, page count, combined text, page text, status, and any extraction message. Maximum upload size: 10 MB. Files are processed in memory. |
+| `POST /api/documents/upload` | Multipart field `file` containing a PDF and optional `response_language` (`en`, `hi`, or `gu`) | Extracts text per page and locally OCRs image pages with empty or very short selectable text. Returns per-page `text` and `ocr_used` values, overall OCR status, filename, page count, combined text, and any extraction message. Maximum upload size: 10 MB. Files are processed in memory. |
 | `POST /api/documents/ask` | JSON containing `question`, `pages` (`page_number` and `text` per page), and `response_language` (`en`, `hi`, or `gu`) | Retrieves up to four relevant passages and limits model context to 4,000 characters. Returns an answer, source passages with page numbers, status, and answer mode. The request is limited to 1,000 pages and 1,000,000 total source characters. |
 | `POST /api/speech/transcribe` | Multipart field `audio_file` | Uses Gnani Prisma v3.0 and automatic Indic language detection. Accepts WAV, MP3, OGG, FLAC, AAC, and M4A files, up to Saar's 10 MB upload limit. Gnani's transcription API accepts clips up to 30 seconds. |
 | `POST /api/speech/synthesize` | JSON `{"text":"...","response_language":"en|hi|gu"}` | Uses Gnani Timbre v2.5 and returns WAV audio. Saar selects Kaveri for English, Nalini for Hindi, or Falak for Gujarati. |
@@ -176,7 +191,7 @@ $env:SAAR_EVON_API_KEY = "your-server-key"
 uvicorn app.main:app --reload --port 8000
 ```
 
-If Evon is not configured or the server fails, Saar does not silently switch to another model provider. It returns a grounded extractive response when the retrieved passages support one, or abstains when they do not.
+The Evon client and settings are retained for future evaluation, but document Q&A currently does not call this endpoint. Q&A always uses local retrieval and extractive answers so an unvalidated model response cannot bypass the evidence checks.
 
 ## Multilingual Q&A behavior
 
@@ -204,6 +219,6 @@ npm run build
 
 ## Implemented scope and limitations
 
-**Implemented:** selectable-text PDF extraction, document-grounded Q&A with page citations, common English/Hindi/Gujarati scholarship-question handling, the REST health endpoint, and backend integrations for Gnani Prisma transcription and Timbre speech generation.
+**Implemented:** selectable-text and local Tesseract OCR extraction for scanned PDF pages, document-grounded Q&A with page citations, common English/Hindi/Gujarati scholarship-question handling, the REST health endpoint, and backend integrations for Gnani Prisma transcription and Timbre speech generation.
 
-**Not available or out of scope:** OCR for scanned or image-only PDFs; general-purpose Hindi/Gujarati translation; hosted Evon API integration in Saar; and independent verification of notice details against an official source. When Evon is not configured, local retrieval and extractive answers are used, and Saar abstains when the notice does not provide enough support. Gnani transcription is limited to clips up to 30 seconds by the provider.
+**Limitations:** OCR requires a local Tesseract installation with the relevant language data, and recognition quality depends on scan clarity and language support. OCR is attempted on pages containing images when selectable text is shorter than 80 characters. Automated tests mock the Tesseract process; verify the local OCR engine with a scanned notice after installing it. Hindi and Gujarati retrieval uses a focused local vocabulary and does not provide general-purpose translation; unfamiliar wording may receive an abstention. Evon is not used for document Q&A, and Saar does not independently verify notice details against an official source. Gnani transcription is limited to clips up to 30 seconds by the provider.

@@ -7,11 +7,6 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Literal
 
-from .evon import (
-    INSUFFICIENT_INFORMATION_TOKEN,
-    EvonNotConfigured,
-    generate_with_evon,
-)
 from .qa_types import (
     DocumentAnswerResponse,
     DocumentQuestionRequest,
@@ -41,18 +36,66 @@ EXTRACTIVE_INTRODUCTIONS = {
     "hi": "नोटिस में लिखा है:",
     "gu": "નોટિસમાં લખ્યું છે:",
 }
+DEADLINE_ANSWER_TEMPLATES = {
+    "en": {
+        "answer": "You should submit your scholarship application by {date}.",
+        "fictional_caveat": (
+            " Please note that this date is marked as fictional in the uploaded notice."
+        ),
+        "other_caveat": " The notice also notes: “{caveat}”.",
+    },
+    "hi": {
+        "answer": "आपको अपना छात्रवृत्ति आवेदन {date} तक जमा करना चाहिए।",
+        "fictional_caveat": (
+            " कृपया ध्यान दें कि अपलोड किए गए नोटिस में इस तारीख को काल्पनिक बताया गया है।"
+        ),
+        "other_caveat": " नोटिस में यह भी लिखा है: “{caveat}”.",
+    },
+    "gu": {
+        "answer": "તમારે તમારી શિષ્યવૃત્તિની અરજી {date} સુધીમાં સબમિટ કરવી જોઈએ.",
+        "fictional_caveat": (
+            " કૃપા કરીને ધ્યાન આપો કે અપલોડ કરેલી નોટિસમાં આ તારીખને કાલ્પનિક દર્શાવવામાં આવી છે."
+        ),
+        "other_caveat": " નોટિસમાં એમ પણ લખ્યું છે: “{caveat}”.",
+    },
+}
 REQUIRED_DOCUMENT_INTRODUCTIONS = {
     "en": "The required documents are:",
     "hi": "आवश्यक दस्तावेज़ हैं:",
     "gu": "જરૂરી દસ્તાવેજો છે:",
 }
+ELIGIBILITY_ANSWER_INTRODUCTIONS = {
+    "en": "Eligibility criteria stated in the notice:",
+    "hi": "नोटिस में दी गई पात्रता शर्तें:",
+    "gu": "નોટિસમાં દર્શાવેલી પાત્રતાની શરતો:",
+}
+ELIGIBILITY_CRITERIA_TERMS = frozenset({
+    "applicant", "applicants", "student", "students", "borrower", "borrowers",
+    "candidate", "candidates", "beneficiary", "beneficiaries", "resident", "residents",
+    "residency", "domicile", "domiciled", "enrolled", "enrollment", "admitted",
+    "admission", "pursuing", "studying", "course", "courses", "program", "programme",
+    "institution", "college", "income", "family", "household", "age", "marks", "grades",
+    "gpa", "category", "caste", "merit", "academic", "disability", "financial", "need",
+    "qualify", "qualified", "must", "shall", "should", "requires", "required", "minimum",
+    "maximum", "below", "above", "exceed", "fulltime", "आवेदक", "छात्र", "विद्यार्थी",
+    "उम्मीदवार", "निवासी", "निवास", "पात्र", "योग्य", "आय", "परिवार", "आयु", "अध्ययन",
+    "प्रवेश", "मान्यता", "अंक", "श्रेणी", "जाति", "दिव्यांग", "आवश्यक", "होना", "चाहिए",
+    "અરજદાર", "ઉમેદવાર", "વિદ્યાર્થી", "વતની", "રહેવાસી", "પાત્ર", "લાયક", "આવક", "કુટુંબ",
+    "ઉંમર", "અભ્યાસ", "પ્રવેશ", "માન્ય", "અભ્યાસક્રમ", "કોર્સ", "ગુણ", "અંક", "વર્ગ", "જાતિ",
+    "દિવ્યાંગ", "આવશ્યક", "જોઈએ", "હોવો", "હોવી",
+})
+ELIGIBILITY_BOILERPLATE_PATTERN = re.compile(
+    r"(?:https?://|www\.|\b[\w-]+\.(?:gov|nic|com|org|net|edu)\b|"
+    r"[\w.+-]+@[\w.-]+\.\w+|\b(?:visit (?:our |the |official )?website|"
+    r"for more information|contact (?:us|details)|helpline|help line)\b)",
+    re.IGNORECASE,
+)
 MULTIPLE_INTENTS_CLARIFICATION = {
     "en": "Please ask about the application deadline and eligibility separately so I can point to the right parts of the notice.",
     "hi": "कृपया आवेदन की अंतिम तिथि और पात्रता के बारे में अलग-अलग पूछें, ताकि मैं नोटिस के सही हिस्से दिखा सकूँ।",
     "gu": "કૃપા કરીને અરજીની અંતિમ તારીખ અને પાત્રતા વિશે અલગ અલગ પૂછો, જેથી હું નોટિસના યોગ્ય વિભાગો બતાવી શકું.",
 }
 
-TOKEN_PATTERN = re.compile(r"[^\W_]+", re.UNICODE)
 SENTENCE_SPLIT_PATTERN = re.compile(
     r"(?<=[!?।])\s+|(?i:(?<!Rs)(?<=\.)\s+(?=[A-Z]))|\n+"
 )
@@ -96,12 +139,89 @@ TERM_FAMILIES = {
     "stipend": {"amount", "amounts", "much", "money", "value", "values", "worth", "stipend"},
 }
 
+# These aliases are used only for local passage matching. They do not create
+# answer content, and they keep Gujarati/Hindi OCR text searchable after a
+# localized question has been mapped to a canonical English retrieval query.
+RETRIEVAL_TERM_ALIAS_GROUPS = (
+    frozenset({
+        "document", "documents", "paper", "papers", "paperwork", "certificate", "proof",
+        "दस्तावेज़", "दस्तावेज", "कागजात", "कागज़ात", "कागज", "काग़ज़", "प्रमाणपत्र",
+        "દસ્તાવેજ", "દસ્તાવેજો", "કાગળ", "કાગળો", "પ્રમાણપત્ર", "સર્ટિફિકેટ",
+    }),
+    frozenset({
+        "required", "require", "need", "needs", "must", "bring", "submit",
+        "आवश्यक", "जरूरी", "ज़रूरी", "अनिवार्य", "चाहिए", "मांगे", "जमा",
+        "જરૂરી", "આવશ્યક", "જોઈએ", "જોઇએ", "જમા", "સબમિટ",
+    }),
+    frozenset({
+        "application", "applications", "apply", "register", "registration",
+        "आवेदन", "आवेदन पत्र", "फॉर्म", "અરજી", "અરજીઓ", "ફોર્મ",
+    }),
+    frozenset({
+        "deadline", "deadlines", "due", "date", "close", "closes", "closing", "until",
+        "last", "अंतिम", "आखिरी", "तिथि", "तारीख", "समय", "सीमा",
+        "છેલ્લી", "અંતિમ", "તારીખ", "મુદત", "સમયમર્યાદા",
+    }),
+    frozenset({
+        "eligibility", "eligible", "qualify", "qualification", "criteria",
+        "पात्रता", "योग्यता", "पात्र", "योग्य", "લાયકાત", "પાત્રતા", "યોગ્યતા", "લાયક",
+    }),
+    frozenset({
+        "scholarship", "scholarships", "award", "awards", "student aid",
+        "छात्रवृत्ति", "छात्रवृति", "स्कॉलरशिप", "વૃત્તિ", "શિષ્યવૃત્તિ", "વિદ્યાવૃત્તિ",
+    }),
+    frozenset({
+        "amount", "amounts", "much", "money", "value", "values", "worth", "stipend",
+        "assistance", "grant", "राशि", "रकम", "धनराशि", "सहायता", "सब्सिडी", "ब्याज",
+        "રકમ", "સહાય", "સબસિડી", "વ્યાજ", "ટકા", "ટકાવારી",
+    }),
+    frozenset({
+        "loan", "loans", "education", "educational", "interest", "subsidy", "scheme",
+        "ऋण", "कर्ज", "शिक्षा", "शैक्षिक", "ब्याज", "योजना", "अनुदान",
+        "લોન", "શિક્ષણ", "શૈક્ષણિક", "વ્યાજ", "યોજના", "સબસિડી",
+    }),
+)
+
 SECTION_HEADING_NAMES = {
     "documents required", "required documents", "documents needed",
     "required papers", "papers required", "how to apply",
     "application process", "application procedure", "eligibility",
     "eligibility criteria", "application deadline", "important dates",
     "key dates", "important information", "scholarship amount", "award amount",
+    "eligibility criteria continued", "other schemes", "related schemes",
+    "additional schemes", "more schemes",
+}
+SECTION_HEADING_ALIASES = {
+    "eligibility criteria continued": "eligibility criteria",
+    "જરૂરી દસ્તાવેજ": "documents required",
+    "જરૂરી દસ્તાવેજો": "documents required",
+    "આવશ્યક દસ્તાવેજો": "documents required",
+    "દસ્તાવેજો જરૂરી": "documents required",
+    "પાત્રતા": "eligibility",
+    "પાત્રતા માપદંડ": "eligibility criteria",
+    "લાયકાત": "eligibility",
+    "લાયકાતના માપદંડ": "eligibility criteria",
+    "અરજી પ્રક્રિયા": "application process",
+    "અરજી કરવાની પ્રક્રિયા": "application procedure",
+    "અરજી કરવાની રીત": "application procedure",
+    "અરજીની છેલ્લી તારીખ": "application deadline",
+    "અરજી કરવાની છેલ્લી તારીખ": "application deadline",
+    "અરજીની અંતિમ તારીખ": "application deadline",
+    "સહાયની રકમ": "scholarship amount",
+    "વ્યાજ સહાયની રકમ": "scholarship amount",
+    "amount of subsidy": "scholarship amount",
+    "subsidy amount": "scholarship amount",
+    "आवश्यक दस्तावेज़": "documents required",
+    "आवश्यक दस्तावेज": "documents required",
+    "जरूरी कागजात": "documents required",
+    "पात्रता": "eligibility",
+    "पात्रता मापदंड": "eligibility criteria",
+    "आवेदन प्रक्रिया": "application process",
+    "आवेदन की प्रक्रिया": "application procedure",
+    "आवेदन की अंतिम तिथि": "application deadline",
+    "आवेदन की आखिरी तारीख": "application deadline",
+    "सहायता राशि": "scholarship amount",
+    "ब्याज सहायता राशि": "scholarship amount",
 }
 LIST_MARKER_PATTERN = re.compile(r"^\s*(?:(?:[-*•▪◦])\s*|\d+\s*[.)]\s*)")
 GUJARATI_SCRIPT_PATTERN = re.compile(r"[\u0a80-\u0aff]")
@@ -120,7 +240,9 @@ GUJARATI_INTENT_TERMS = {
     ),
     "when": ("ક્યારે", "કયા દિવસે", "કઈ તારીખે", "ક્યારે સુધી"),
     "amount": ("રકમ", "રાશિ", "ધનરાશિ", "પૈસા", "રૂપિયા", "રૂપિયો", "amount"),
-    "amount_topic": ("સહાય", "આર્થિક સહાય", "સ્ટાઇપેન્ડ", "વજીફો", "પુરસ્કાર"),
+    "amount_topic": (
+        "સહાય", "આર્થિક સહાય", "સબસિડી", "વ્યાજ સહાય", "સ્ટાઇપેન્ડ", "વજીફો", "પુરસ્કાર",
+    ),
     "quantity": ("કેટલી", "કેટલું", "કેટલા", "કેટલો"),
     "eligibility": (
         "પાત્રતા", "લાયકાત", "પાત્ર", "લાયક", "યોગ્યતા", "કોણ અરજી કરી શકે",
@@ -151,7 +273,7 @@ HINDI_INTENT_TERMS = {
     "when": ("कब", "कब तक", "किस तारीख", "किस दिन"),
     "amount": ("राशि", "रकम", "धनराशि", "कितने पैसे", "रुपये", "रुपए", "रुपया", "amount"),
     "amount_topic": (
-        "सहायता", "आर्थिक सहायता", "स्टाइपेंड", "वजीफा", "छात्रवृत्ति", "स्कॉलरशिप",
+        "सहायता", "आर्थिक सहायता", "सब्सिडी", "स्टाइपेंड", "वजीफा", "छात्रवृत्ति", "स्कॉलरशिप",
         "stipend", "scholarship", "assistance",
     ),
     "quantity": ("कितना", "कितनी", "कितने"),
@@ -186,7 +308,38 @@ ENGLISH_DEADLINE_CUES = (
     "final day",
     "closing date",
 )
-ENGLISH_APPLICATION_TERMS = ("apply", "application", "applications", "submit", "submission")
+ENGLISH_ELIGIBILITY_CUES = (
+    "eligibility",
+    "eligible",
+    "qualify",
+    "qualified",
+    "qualification",
+    "qualifications",
+    "who can apply",
+    "who may apply",
+)
+ENGLISH_AMOUNT_QUANTITY_CUES = ("amount", "how much", "money")
+ENGLISH_AMOUNT_TOPIC_CUES = (
+    "scholarship", "award", "financial assistance", "assistance", "stipend", "grant", "money",
+)
+ENGLISH_DOCUMENT_TERMS = (
+    "document", "documents", "paper", "papers", "paperwork", "certificate", "proof",
+)
+ENGLISH_DOCUMENT_REQUIREMENT_CUES = (
+    "required", "require", "need", "needed", "must", "submit", "provide", "bring", "include",
+)
+ENGLISH_DOCUMENT_REQUEST_CUES = ("what", "which")
+ENGLISH_DOCUMENT_CONTEXT_TERMS = ("scholarship", "application", "applications")
+ENGLISH_DOCUMENT_ACTION_CUES = ("submit", "provide", "bring", "include", "send")
+PERSONAL_ELIGIBILITY_CUES = (
+    "am i eligible",
+    "am i qualified",
+    "do i qualify",
+    "would i qualify",
+    "do i meet",
+)
+ENGLISH_APPLICATION_CONTEXT_TERMS = ("apply", "application", "applications")
+ENGLISH_SUBMISSION_TERMS = ("submit", "submission")
 LOCALIZED_WORD_SUFFIXES = (
     "ઓના", "ઓમાં", "ઓથી", "ો", "ી", "ા", "ુ", "ે", "ૈ", "ૌ", "ઓ", "ની", "નો",
     "નું", "ના", "ને", "માં", "થી",
@@ -197,6 +350,26 @@ AMOUNT_VALUE_PATTERN = re.compile(
     r"\b(?:amount|stipend|award|grant|worth)\b[^.\n]{0,60}\b\d[\d,]*)",
     re.IGNORECASE,
 )
+AMOUNT_CONTEXT_PATTERN = re.compile(
+    r"\b(?:scholarship|award|amount|stipend|grant|subsidy|financial\s+assistance|assistance)\b",
+    re.IGNORECASE,
+)
+AMOUNT_SPECIFIC_CONTEXT_PATTERN = re.compile(
+    r"\b(?:scholarship\s+amount|award(?:\s+amount)?|stipend|grant|subsidy|"
+    r"financial\s+assistance|assistance)\b",
+    re.IGNORECASE,
+)
+AMOUNT_FEE_CONTEXT_PATTERN = re.compile(r"\b(?:application\s+)?fees?\b", re.IGNORECASE)
+SUBSIDY_ON_LOAN_LIMIT_PATTERN = re.compile(
+    r"\bsubsid(?:y|ies)\b[^.\n]{0,140}?\b(?:education(?:al)?\s+)?loans?\b"
+    r"[^.\n]{0,100}?\bup\s+to\s+(?P<currency>₹|INR|Rs\.?)\s*"
+    r"(?P<value>\d[\d,]*)(?P<unit>\s*(?:lakhs?|crores?)?)",
+    re.IGNORECASE,
+)
+SUBSIDY_LOAN_LIMIT_ANSWER_TEMPLATES = {
+    "hi": "नोटिस में सब्सिडी की निश्चित राशि नहीं बताई गई है; इसमें कहा गया है कि {amount} तक के शिक्षा ऋण पर सब्सिडी उपलब्ध है।",
+    "gu": "નોટિસમાં સબસિડીની ચોક્કસ રકમ જણાવેલી નથી; તેમાં લખ્યું છે કે {amount} સુધીની શિક્ષણ લોન પર સબસિડી ઉપલબ્ધ છે.",
+}
 DEADLINE_MONTH_NAMES = (
     r"Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
     r"Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|"
@@ -244,11 +417,46 @@ class _RankedPassage:
 
 
 def _tokens(text: str) -> set[str]:
-    return {
+    tokens = {
         token
-        for token in TOKEN_PATTERN.findall(text.casefold())
+        for token in _unicode_word_tokens(text)
         if token not in STOP_WORDS
     }
+    return _expand_retrieval_aliases(tokens)
+
+
+def _unicode_word_tokens(text: str) -> list[str]:
+    """Split on separators while keeping combining marks with Indic letters."""
+    normalized = unicodedata.normalize("NFC", text).casefold()
+    tokens: list[str] = []
+    current: list[str] = []
+
+    def finish_token() -> None:
+        if current:
+            tokens.append("".join(current))
+            current.clear()
+
+    for character in normalized:
+        category = unicodedata.category(character)
+        if category[0] in {"L", "N"} or (category[0] == "M" and current):
+            current.append(character)
+        else:
+            finish_token()
+    finish_token()
+    return tokens
+
+
+def _expand_retrieval_aliases(tokens: set[str]) -> set[str]:
+    """Expand matched words with a small, local multilingual retrieval glossary."""
+    expanded = set(tokens)
+    changed = True
+    while changed:
+        previous_size = len(expanded)
+        for aliases in RETRIEVAL_TERM_ALIAS_GROUPS:
+            if expanded.intersection(aliases):
+                expanded.update(aliases)
+        changed = len(expanded) != previous_size
+    return expanded
 
 
 def _normalize_intent_text(value: str) -> str:
@@ -338,19 +546,54 @@ def map_hindi_question(question: str) -> tuple[str, str | None]:
 
 
 def map_english_question(question: str) -> tuple[str, str | None]:
-    """Normalize explicit application-deadline questions for section retrieval."""
+    """Normalize common English scholarship questions for retrieval."""
     text = _normalize_intent_text(question)
-    has_application_context = _contains_any_intent_term(text, ENGLISH_APPLICATION_TERMS)
+    if _contains_any_intent_term(text, ENGLISH_ELIGIBILITY_CUES):
+        return CANONICAL_QUESTIONS_BY_INTENT["eligibility"], "eligibility"
+
+    has_application_context = _contains_any_intent_term(
+        text,
+        ENGLISH_APPLICATION_CONTEXT_TERMS,
+    )
     has_deadline_context = _contains_any_intent_term(text, ENGLISH_DEADLINE_CUES) or (
         _contains_any_intent_term(text, ("deadline", "deadlines"))
         and has_application_context
     )
-    if (
-        has_deadline_context
+    has_submission_timing = (
+        _contains_any_intent_term(text, ("when",))
+        and _contains_any_intent_term(text, ENGLISH_SUBMISSION_TERMS)
         and has_application_context
-    ):
+    )
+    if has_submission_timing or (has_deadline_context and has_application_context):
         return CANONICAL_QUESTIONS_BY_INTENT["deadline"], "deadline"
+
+    has_document_term = _contains_any_intent_term(text, ENGLISH_DOCUMENT_TERMS)
+    has_document_requirement_cue = _contains_any_intent_term(
+        text,
+        ENGLISH_DOCUMENT_REQUIREMENT_CUES,
+    )
+    asks_what_to_submit_or_provide = (
+        _contains_any_intent_term(text, ENGLISH_DOCUMENT_REQUEST_CUES)
+        and _contains_any_intent_term(text, ENGLISH_DOCUMENT_ACTION_CUES)
+        and _contains_any_intent_term(text, ENGLISH_DOCUMENT_CONTEXT_TERMS)
+    )
+    if (has_document_term and has_document_requirement_cue) or asks_what_to_submit_or_provide:
+        return CANONICAL_QUESTIONS_BY_INTENT["documents"], "documents"
+
+    has_amount_quantity = _contains_any_intent_term(text, ENGLISH_AMOUNT_QUANTITY_CUES)
+    has_amount_topic = _contains_any_intent_term(text, ENGLISH_AMOUNT_TOPIC_CUES)
+    if has_amount_quantity and has_amount_topic:
+        return CANONICAL_QUESTIONS_BY_INTENT["amount"], "amount"
+
     return question, None
+
+
+def _asks_personal_eligibility_question(question: str) -> bool:
+    """Detect a question asking Saar to decide whether the user personally qualifies."""
+    return _contains_any_intent_term(
+        _normalize_intent_text(question),
+        PERSONAL_ELIGIBILITY_CUES,
+    )
 
 
 def map_question_for_retrieval(question: str) -> tuple[str, str | None]:
@@ -378,7 +621,8 @@ def _asks_deadline_and_eligibility(question: str) -> bool:
         *(term for terms in language_terms for term in terms["application"]),
     )
     eligibility_terms = (
-        "eligibility", "eligible", "qualify", "qualification", "criteria",
+        *ENGLISH_ELIGIBILITY_CUES,
+        "criteria",
         *(term for terms in language_terms for term in terms["eligibility"]),
     )
 
@@ -452,10 +696,11 @@ def _translate_document_item(item: str, response_language: str) -> str:
 
 def _query_concepts(question: str) -> list[set[str]]:
     concepts: list[set[str]] = []
-    for token in TOKEN_PATTERN.findall(question.casefold()):
+    normalized = unicodedata.normalize("NFC", question).casefold()
+    for token in _unicode_word_tokens(normalized):
         if token in STOP_WORDS:
             continue
-        family = set(TERM_FAMILIES.get(token, {token}))
+        family = _expand_retrieval_aliases(set(TERM_FAMILIES.get(token, {token})))
         overlapping = [index for index, concept in enumerate(concepts) if concept & family]
         if not overlapping:
             concepts.append(family)
@@ -479,7 +724,9 @@ def _split_long_segment(segment: str) -> list[str]:
 
 
 def _heading_name(value: str) -> str:
-    return " ".join(TOKEN_PATTERN.findall(value.casefold()))
+    normalized = unicodedata.normalize("NFC", value).casefold()
+    name = " ".join(_unicode_word_tokens(normalized))
+    return SECTION_HEADING_ALIASES.get(name, name)
 
 
 def _heading_line(line: str) -> tuple[str, str] | None:
@@ -679,44 +926,276 @@ def _required_documents_response(
     return None
 
 
+def _natural_deadline_answer(body: str, response_language: str) -> str | None:
+    """Format a deadline from its section while retaining its adjacent caveat."""
+    date_match = DEADLINE_DATE_PATTERN.search(body)
+    if not date_match:
+        return None
+
+    templates = DEADLINE_ANSWER_TEMPLATES[response_language]
+    answer = templates["answer"].format(date=date_match.group(0))
+    following_text = body[date_match.end():]
+    caveat_match = re.match(r"\s*(\([^()\r\n]{1,120}\))", following_text)
+    if not caveat_match:
+        return answer
+
+    caveat = caveat_match.group(1)
+    if "fictional" in caveat.casefold():
+        return answer + templates["fictional_caveat"]
+    return answer + templates["other_caveat"].format(caveat=caveat)
+
+
+def _natural_amount_answer(body: str) -> str | None:
+    """Return a natural amount statement while preserving its source wording."""
+    normalized = re.sub(r"\s+", " ", body).strip()
+    normalized = LIST_MARKER_PATTERN.sub("", normalized, count=1)
+    if not AMOUNT_VALUE_PATTERN.search(normalized):
+        return None
+
+    sentences = [
+        sentence.strip()
+        for sentence in SENTENCE_SPLIT_PATTERN.split(normalized)
+        if sentence.strip()
+    ]
+    if not sentences:
+        return None
+
+    amount_fragment = re.match(
+        r"^(?:₹|INR\b|Rs\.?\b|rupees?\b|\d|up\s+to\s+(?:₹|INR\b|Rs\.?\b|\d))",
+        sentences[0],
+        flags=re.IGNORECASE,
+    )
+    if not amount_fragment:
+        return normalized
+
+    first_sentence = f"The scholarship amount is listed as {sentences[0].rstrip(' .')}."
+    remaining = [
+        f'The notice also states: “{sentence}”'
+        for sentence in sentences[1:]
+    ]
+    return " ".join([first_sentence, *remaining])
+
+
+def _localized_subsidy_loan_limit_answer(body: str, response_language: str) -> str | None:
+    """Explain a loan coverage ceiling without presenting it as the subsidy amount."""
+    template = SUBSIDY_LOAN_LIMIT_ANSWER_TEMPLATES.get(response_language)
+    match = SUBSIDY_ON_LOAN_LIMIT_PATTERN.search(body)
+    if not template or not match:
+        return None
+
+    currency = match.group("currency")
+    value = match.group("value")
+    source_unit = match.group("unit").strip().casefold()
+    localized_currency = "રૂ." if response_language == "gu" and currency != "₹" else "₹"
+    localized_unit = ""
+    if source_unit.startswith("lakh"):
+        localized_unit = "લાખ" if response_language == "gu" else "लाख"
+    elif source_unit.startswith("crore"):
+        localized_unit = "કરોડ" if response_language == "gu" else "करोड़"
+
+    amount = f"{localized_currency} {value}"
+    if localized_unit:
+        amount = f"{amount} {localized_unit}"
+    return template.format(amount=amount)
+
+
+def _eligibility_criteria_sentences(body: str) -> list[str]:
+    """Keep concrete eligibility conditions and discard link/footer noise."""
+    selected: list[str] = []
+    seen: set[str] = set()
+    for sentence in SENTENCE_SPLIT_PATTERN.split(body):
+        source_text = sentence.strip()
+        text = LIST_MARKER_PATTERN.sub("", source_text, count=1).strip()
+        if not text or ELIGIBILITY_BOILERPLATE_PATTERN.search(text):
+            continue
+        tokens = _tokens(text)
+        if not tokens.intersection(ELIGIBILITY_CRITERIA_TERMS):
+            continue
+        key = unicodedata.normalize("NFC", text).casefold()
+        if key not in seen:
+            selected.append(source_text)
+            seen.add(key)
+    return selected
+
+
+def _eligibility_section_response(
+    passages: list[_RankedPassage],
+    response_language: str,
+) -> tuple[str, list[SourcePassage]] | None:
+    """Return concise, source-worded criteria with filtered page-level evidence."""
+    selected_sections: dict[tuple[int, str], list[str]] = {}
+    seen_sentences: set[str] = set()
+
+    for passage in sorted(passages, key=lambda item: item.order):
+        if _heading_name(passage.heading) not in SECTION_NAMES_BY_INTENT["eligibility"]:
+            continue
+        criteria = _eligibility_criteria_sentences(passage.body)
+        if not criteria:
+            continue
+
+        key = (passage.source.page_number, passage.heading)
+        section_sentences = selected_sections.setdefault(key, [])
+        for sentence in criteria:
+            sentence_key = unicodedata.normalize("NFC", sentence).casefold()
+            if sentence_key in seen_sentences:
+                continue
+            section_sentences.append(sentence)
+            seen_sentences.add(sentence_key)
+
+    if not selected_sections:
+        return None
+
+    sources = [
+        SourcePassage(
+            page_number=page_number,
+            text=f"{heading}\n" + "\n".join(sentences),
+        )
+        for (page_number, heading), sentences in selected_sections.items()
+    ]
+    bullets = [
+        f"• {LIST_MARKER_PATTERN.sub('', sentence, count=1).strip()}"
+        for source in sources
+        for sentence in source.text.splitlines()[1:]
+    ]
+    answer = f"{ELIGIBILITY_ANSWER_INTRODUCTIONS[response_language]}\n" + "\n".join(bullets)
+    return answer, sources
+
+
+def _deadline_evidence_text(body: str, heading: str) -> str | None:
+    """Keep only the sentence containing the date and its deadline context."""
+    has_deadline_heading = _heading_name(heading) in SECTION_NAMES_BY_INTENT["deadline"]
+    for sentence in SENTENCE_SPLIT_PATTERN.split(body):
+        text = sentence.strip()
+        if not DEADLINE_DATE_PATTERN.search(text):
+            continue
+        if has_deadline_heading or DEADLINE_CONTEXT_PATTERN.search(text):
+            return text
+    return None
+
+
 def _mapped_section_response(
     intent: str | None,
     passages: list[_RankedPassage],
     response_language: str,
 ) -> tuple[str, SourcePassage] | None:
-    """Quote the text under the section selected by a mapped localized question."""
+    """Build a response from the section selected by a mapped question."""
     section_names = SECTION_NAMES_BY_INTENT.get(intent or "")
-    if not section_names:
+    if not section_names and intent != "deadline":
         return None
 
     matching = [
         passage
         for passage in passages
-        if _heading_name(passage.heading) in section_names and passage.body.strip()
+        if passage.body.strip()
+        and (
+            _heading_name(passage.heading) in (section_names or set())
+            or (intent == "amount" and _passage_has_explicit_amount(passage))
+            or (
+                intent == "deadline"
+                and DEADLINE_DATE_PATTERN.search(passage.body)
+                and DEADLINE_CONTEXT_PATTERN.search(passage.body)
+            )
+        )
     ]
     if not matching:
         return None
 
     selected = matching[0]
+    same_section_candidates = (
+        passages
+        if intent == "amount"
+        and _heading_name(selected.heading) in SECTION_NAMES_BY_INTENT["amount"]
+        else matching
+    )
     same_section = sorted(
         (
-            passage for passage in matching
+            passage for passage in same_section_candidates
             if passage.source.page_number == selected.source.page_number
             and passage.heading == selected.heading
+            and passage.body.strip()
         ),
         key=lambda passage: passage.order,
     )
     body = "\n".join(passage.body.strip() for passage in same_section).strip()
-    answer = f'{EXTRACTIVE_INTRODUCTIONS[response_language]} “{body}”'
+    if intent == "deadline":
+        body = _deadline_evidence_text(body, selected.heading)
+        if body is None:
+            return None
+        answer = _natural_deadline_answer(body, response_language)
+        if answer is None:
+            return None
+    elif intent == "amount":
+        if _heading_name(selected.heading) not in SECTION_NAMES_BY_INTENT["amount"]:
+            body = _amount_evidence_text(body)
+            if body is None:
+                return None
+        if response_language == "en":
+            answer = _natural_amount_answer(body)
+            if answer is None:
+                return None
+        else:
+            answer = _localized_subsidy_loan_limit_answer(body, response_language)
+            if answer is None:
+                answer = f'{EXTRACTIVE_INTRODUCTIONS[response_language]} “{body}”'
+    else:
+        answer = f'{EXTRACTIVE_INTRODUCTIONS[response_language]} “{body}”'
     source = SourcePassage(
         page_number=selected.source.page_number,
-        text=f"{selected.heading}\n{body}",
+        text=f"{selected.heading}\n{body}" if selected.heading else body,
     )
     return answer, source
 
 
+def _passage_has_explicit_amount(passage: _RankedPassage) -> bool:
+    has_amount_heading = (
+        _heading_name(passage.heading) in SECTION_NAMES_BY_INTENT["amount"]
+    )
+    for sentence in SENTENCE_SPLIT_PATTERN.split(passage.body):
+        if not AMOUNT_VALUE_PATTERN.search(sentence):
+            continue
+        fee_only_context = (
+            AMOUNT_FEE_CONTEXT_PATTERN.search(sentence)
+            and not AMOUNT_SPECIFIC_CONTEXT_PATTERN.search(sentence)
+        )
+        if fee_only_context:
+            continue
+        if has_amount_heading or AMOUNT_CONTEXT_PATTERN.search(sentence):
+            return True
+    return False
+
+
+def _amount_evidence_text(body: str) -> str | None:
+    """Isolate the sentence that explicitly ties a value to an award or assistance."""
+    normalized = re.sub(r"\s+", " ", body).strip()
+    sentences = [
+        sentence.strip()
+        for sentence in SENTENCE_SPLIT_PATTERN.split(normalized)
+        if sentence.strip()
+    ]
+    for index, sentence in enumerate(sentences):
+        if not AMOUNT_VALUE_PATTERN.search(sentence):
+            continue
+        if not AMOUNT_CONTEXT_PATTERN.search(sentence):
+            continue
+        if (
+            AMOUNT_FEE_CONTEXT_PATTERN.search(sentence)
+            and not AMOUNT_SPECIFIC_CONTEXT_PATTERN.search(sentence)
+        ):
+            continue
+        selected = [sentence]
+        if index + 1 < len(sentences) and re.search(
+            r"\b(?:subject\s+to|provided\s+that|only\s+if|unless|eligible|"
+            r"eligibility|maintain|review|renewal|may\s+be\s+adjusted)\b",
+            sentences[index + 1],
+            flags=re.IGNORECASE,
+        ):
+            selected.append(sentences[index + 1])
+        return " ".join(selected)
+    return None
+
+
 def _has_explicit_amount(passages: list[_RankedPassage]) -> bool:
-    return any(AMOUNT_VALUE_PATTERN.search(passage.source.text) for passage in passages)
+    return any(_passage_has_explicit_amount(passage) for passage in passages)
 
 
 def _has_explicit_deadline_evidence(passages: list[_RankedPassage]) -> bool:
@@ -798,7 +1277,10 @@ async def answer_document_question(
             sources=[],
             status="empty_document",
             mode="extractive",
-            message="This notice has no readable text. Scanned pages need OCR, which Saar doesn't support yet.",
+            message=(
+                "No readable text was provided for this notice. If it is a scan, "
+                "make sure local OCR completed successfully before asking a question."
+            ),
         )
 
     if _asks_deadline_and_eligibility(request.question):
@@ -815,8 +1297,6 @@ async def answer_document_question(
         return _not_found_response(response_language=request.response_language)
     if mapped_intent == "deadline" and not _has_explicit_deadline_evidence(ranked_passages):
         return _not_found_response(response_language=request.response_language)
-    passages = [passage.source for passage in ranked_passages]
-
     if _is_required_documents_question(retrieval_question):
         document_answer = _required_documents_response(
             retrieval_question,
@@ -833,6 +1313,21 @@ async def answer_document_question(
             mode="extractive",
         )
 
+    if mapped_intent == "eligibility":
+        eligibility_answer = _eligibility_section_response(
+            ranked_passages,
+            request.response_language,
+        )
+        if not eligibility_answer:
+            return _not_found_response(response_language=request.response_language)
+        answer, sources = eligibility_answer
+        return DocumentAnswerResponse(
+            answer=answer,
+            sources=sources,
+            status="answered",
+            mode="extractive",
+        )
+
     mapped_section_answer = _mapped_section_response(
         mapped_intent,
         ranked_passages,
@@ -841,45 +1336,11 @@ async def answer_document_question(
     if mapped_intent == "amount" and not _has_explicit_amount(ranked_passages):
         return _not_found_response(response_language=request.response_language)
 
-    evon_error_message: str | None = None
-    try:
-        model_answer = await generate_with_evon(
-            request.question,
-            passages,
-            request.response_language,
-        )
-    except EvonNotConfigured:
-        model_answer = None
-        evon_error_message = (
-            "Evon isn't configured. Saar is answering with short quotes from matching notice text."
-        )
-    except Exception:
-        model_answer = None
-        evon_error_message = (
-            "Evon couldn't be reached. Saar is answering with short quotes from matching notice text."
-        )
-
-    if model_answer is not None:
-        if model_answer.strip() == INSUFFICIENT_INFORMATION_TOKEN:
-            if mapped_section_answer:
-                answer, source = mapped_section_answer
-                return DocumentAnswerResponse(
-                    answer=answer,
-                    sources=[source],
-                    status="answered",
-                    mode="extractive",
-                )
-            return _not_found_response(
-                response_language=request.response_language,
-                mode="evon",
-            )
-        return DocumentAnswerResponse(
-            answer=model_answer,
-            sources=passages,
-            status="answered",
-            mode="evon",
-        )
-
+    # Evon is intentionally not called for document QA until its generated
+    # answers can be validated against source evidence. Deterministic answers
+    # below preserve citations and cannot add unsupported document facts.
+    if mapped_intent == "amount" and not mapped_section_answer:
+        return _not_found_response(response_language=request.response_language)
     if mapped_section_answer:
         answer, source = mapped_section_answer
         return DocumentAnswerResponse(
@@ -887,15 +1348,11 @@ async def answer_document_question(
             sources=[source],
             status="answered",
             mode="extractive",
-            message=evon_error_message,
         )
 
     evidence = _extractive_support(retrieval_question, ranked_passages)
     if not evidence:
-        return _not_found_response(
-            response_language=request.response_language,
-            message=evon_error_message,
-        )
+        return _not_found_response(response_language=request.response_language)
 
     first_passage = evidence[0].text
     extractive_intro = EXTRACTIVE_INTRODUCTIONS[request.response_language]
@@ -904,5 +1361,4 @@ async def answer_document_question(
         sources=evidence,
         status="answered",
         mode="extractive",
-        message=evon_error_message,
     )
